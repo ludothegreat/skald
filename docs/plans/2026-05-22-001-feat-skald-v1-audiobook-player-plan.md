@@ -8,17 +8,17 @@ origin: docs/brainstorm/decisions.md
 
 # skald v1 — cross-platform audiobook player
 
+> **Plan history:** Originally written 2026-05-22 from a 27-question brainstorm. Deepened the same day with 8 parallel review agents; their findings (real defects, refinements, perf and idiom improvements) have been folded into the phases below. The pre-deepening version is recoverable via `git show 39873fd`. Optional scope rollbacks the simplicity reviewer suggested live at the end as an appendix — they contradict explicit brainstorm decisions and are *not* applied; they're surfaced for the user's awareness if v1 schedule slips.
+
 ## Overview
 
 Build `skald` v1: a cross-platform (Linux + Windows) audiobook player with both a PySide6 GUI and a terminal CLI, backed by libmpv for playback and SQLite for state. Ship as an AppImage + AUR package on Linux and an Inno Setup `.exe` installer on Windows. Canonical git is `gitforge.online`, mirrored (including tags) to `github.com/ludothegreat/skald` where CI, issues, and releases live.
 
-All v1 scope and design decisions are pre-decided across **27 brainstorm questions** in [`docs/brainstorm/decisions.md`](../brainstorm/decisions.md). This plan does not re-litigate them — it sequences the implementation, pins versions, and captures the 2026-current technical details from external research that grounds the build.
+All v1 scope and design decisions are pre-decided across **27 brainstorm questions** in [`docs/brainstorm/decisions.md`](../brainstorm/decisions.md).
 
 ## Problem Statement / Motivation
 
-Ludo wants a "super basic" audiobook player that works on both their Linux desktop (Arch) and Windows machines, with a GUI for casual use and a CLI for terminal-only sessions. The market gap they're filling for themselves: most existing players are either Android-only, web-only (Audiobookshelf needs a server), or skewed toward one OS (Audible app is closed-source and tied to Audible's ecosystem). Existing cross-platform Python audiobook players are mostly abandoned or single-developer hobby projects in poor health.
-
-The brainstorm framed v1 as "all the default settings and features that an audiobook player should have," explicitly *not* a feature-light prototype. Deferred items live in [`docs/brainstorm/future-features.md`](../brainstorm/future-features.md).
+Ludo wants a "super basic" audiobook player that works on both their Linux desktop (Arch) and Windows machines, with a GUI for casual use and a CLI for terminal-only sessions. Existing alternatives are Android-only, web-only (Audiobookshelf needs a server), tied to one ecosystem (Audible app), or abandoned. The brainstorm framed v1 as "all the default settings and features that an audiobook player should have," explicitly *not* a feature-light prototype. Deferred items live in [`docs/brainstorm/future-features.md`](../brainstorm/future-features.md).
 
 ## Proposed Solution
 
@@ -26,9 +26,9 @@ A single Python application with three runtime modes:
 
 1. **GUI mode** (default): full PySide6 desktop app with library, book detail, persistent player bar, themes
 2. **Headless CLI playback**: `skald play <path>` — TUI player in the terminal, no GUI
-3. **Library admin CLI**: `skald scan` / `skald list` — non-interactive
+3. **Library admin CLI**: `skald scan` / `skald library` — non-interactive
 
-All three share one SQLite library DB, one libmpv-driven playback engine, one settings file, and one log file in the platform's standard user data directory (`~/.local/share/skald/` on Linux, `%APPDATA%\Skald\skald\` on Windows via `platformdirs`).
+All three share one SQLite library DB, one libmpv-driven playback engine, one settings file, and one log file in the platform's standard user data directory (`~/.local/share/skald/` on Linux, `%APPDATA%\skald\` on Windows via `platformdirs`).
 
 Single-instance enforcement (via `QLocalServer`) means a second GUI launch focuses the existing window, and `skald play` from the CLI refuses to run when the GUI is up (preventing two libmpv instances racing on the SQLite DB).
 
@@ -36,73 +36,78 @@ Single-instance enforcement (via `QLocalServer`) means a second GUI launch focus
 
 ### Architecture
 
+Flat package layout — no `core/` namespace (Python idiom; `core/` is a Java-ism). OS-specific code is isolated under `integration/` with lazy imports so startup doesn't load `winrt` or `dbus_fast` until the relevant adapter is constructed.
+
 ```
 skald/
-├── pyproject.toml                  # PEP 621, all deps + extras (linux/windows)
+├── pyproject.toml                  # PEP 621; all deps + extras (linux/windows/dev)
 ├── README.md, LICENSE, .gitignore  # present
-├── .pre-commit-config.yaml         # ruff, black, mypy
+├── .pre-commit-config.yaml         # ruff, black, mypy, lint-imports
 ├── .github/workflows/
 │   ├── test.yml                    # lint+typecheck+test on push/PR (matrix)
-│   └── release.yml                 # on tag v*, build artifacts + GH Release
+│   └── release.yml                 # on tag v*, build + GH Release + SHA256SUMS
 ├── src/skald/
 │   ├── __init__.py                 # __version__
-│   ├── __main__.py                 # entry; routes to GUI or CLI
-│   ├── core/
-│   │   ├── player.py               # libmpv wrapper (locale fix, terminate, Qt signals)
-│   │   ├── library.py              # in-process library state
-│   │   ├── scanner.py              # filesystem walk + book detection
-│   │   ├── metadata.py             # mutagen + folder-name fallback + overrides
-│   │   ├── chapters.py             # M4B chpl + mpv fallback + folder-of-MP3s inference
-│   │   ├── positions.py            # per-book position read/write
-│   │   ├── bookmarks.py            # user bookmarks CRUD
-│   │   ├── covers.py               # extract + store cover art files
-│   │   ├── settings.py             # config.toml loader/writer
-│   │   ├── paths.py                # platformdirs wrappers
-│   │   ├── logging_setup.py        # rotating file handler + --debug toggle
-│   │   ├── single_instance.py      # QLocalServer / QLocalSocket
-│   │   ├── playback_controller.py  # Protocol shared with OS-integration adapters
-│   │   └── updates.py              # GH releases ping for update banner
+│   ├── __main__.py                 # entry; LC_NUMERIC fix HERE; routes to GUI or CLI
+│   ├── errors.py                   # SkaldError, PlayerError, LibraryError, MigrationError
+│   ├── paths.py                    # platformdirs wrappers; all return pathlib.Path
+│   ├── settings.py                 # pydantic-settings BaseSettings(toml_file=...)
+│   ├── logging_setup.py            # dictConfig; RotatingFileHandler 5×5MB
+│   ├── single_instance.py          # QLocalServer/Socket; UserAccessOption + 0700
+│   ├── updates.py                  # GH Releases ping (HTTPS GET; 5s timeout)
+│   ├── validation.py               # validate_media_path() — resolve+ext-allowlist
+│   ├── time_util.py                # ms_to_human(), human_to_ms()
+│   ├── player.py                   # libmpv wrapper (callbacks, NOT Qt signals)
+│   ├── playback_controller.py      # Protocol + PlaybackState (frozen slots)
+│   ├── library.py                  # in-process library state + repository helpers
+│   ├── scanner.py                  # FS walk; symlink guards; QThread worker
+│   ├── metadata.py                 # mutagen + folder-name fallback
+│   ├── chapters.py                 # M4B chpl + mpv chapter_list fallback
+│   ├── positions.py                # per-book position read/write (timer pauses on pause)
+│   ├── bookmarks.py                # user bookmarks CRUD
+│   ├── covers.py                   # extract original + write 360px thumbnail
 │   ├── db/
-│   │   ├── schema.py               # migrations list, PRAGMA user_version pattern
-│   │   └── connection.py           # WAL pragmas, connection factory
+│   │   ├── __init__.py
+│   │   ├── connection.py           # WAL pragmas; threading.local; file lock
+│   │   ├── migrations.py           # registry; refuse-newer; manual BEGIN/COMMIT; online backup
+│   │   └── migrations/
+│   │       └── 0001_initial.sql    # schema v1
 │   ├── cli/
 │   │   ├── __init__.py             # Typer app
-│   │   ├── play.py                 # headless TUI player
+│   │   ├── play.py                 # headless rich.live TUI player (no separate tui/)
 │   │   ├── scan.py
-│   │   └── list_cmd.py             # `list` reserved name → list_cmd
+│   │   └── library.py              # renamed from `list_cmd.py`
 │   ├── gui/
-│   │   ├── app.py                  # QApplication setup
-│   │   ├── main_window.py          # QSplitter, bottom player bar, shortcuts
+│   │   ├── __init__.py
+│   │   ├── app.py                  # QApplication; Fusion; translator; theme
+│   │   ├── main_window.py          # QSplitter; bottom player bar; shortcuts
 │   │   ├── library_view.py         # grid + list modes (toggle)
 │   │   ├── book_detail.py          # cover, chapters, bookmarks, metadata
 │   │   ├── player_bar.py           # persistent transport
-│   │   ├── dialogs/                # edit metadata, cover upload, sleep timer
-│   │   ├── theme.py                # QSS load + variable substitution + switch
-│   │   └── themes/
-│   │       ├── dark.qss.tmpl
-│   │       └── light.qss.tmpl
+│   │   ├── dialogs.py              # edit-metadata, cover-upload, sleep-timer (single file)
+│   │   └── theme.py                # string.Template substitution; QSS load + switch
 │   ├── integration/
-│   │   ├── mpris_linux.py          # Linux-only import; mpris_server-backed
-│   │   └── smtc_windows.py         # Windows-only import; winrt + HWND interop
+│   │   ├── __init__.py             # init_media_keys() — lazy OS dispatch
+│   │   ├── mpris.py                # Linux only; mpris_server-backed
+│   │   └── smtc.py                 # Windows only; winrt + HWND interop
 │   ├── resources/
 │   │   ├── icons/                  # SVG, recolored at theme load
+│   │   ├── themes/                 # dark.qss.template, light.qss.template
+│   │   ├── config.default.toml     # commented defaults; copied on first run
 │   │   └── translations/           # .ts and compiled .qm
-│   └── tui/
-│       └── player_tui.py           # rich.live-based for the CLI play command
+│   └── _stubs/
+│       └── mpv.pyi                 # local stubs for python-mpv
 ├── tests/
-│   ├── fixtures/
-│   │   ├── short.mp3               # ≤5s, public-domain LibriVox snippet
-│   │   ├── short.m4b               # with embedded chapter
-│   │   └── folder_book/            # 3× tiny MP3s with track tags
+│   ├── conftest.py                 # session fixtures generate audio via ffmpeg
 │   ├── unit/                       # scanner, metadata, positions, settings, CLI args
-│   └── integration/                # ~5-10 tests using fixtures + libmpv
+│   └── integration/                # ~5-10 tests using generated fixtures + libmpv
 ├── packaging/
 │   ├── linux/
 │   │   ├── skald.desktop
 │   │   ├── AppImageBuilder.yml     # or linuxdeploy invocation
 │   │   └── PKGBUILD                # AUR
 │   └── windows/
-│       └── skald.iss               # Inno Setup script
+│       └── skald.iss               # Inno Setup; HKCU file association
 ├── docs/
 │   ├── brainstorm/                 # decisions, future-features, learned-topics, tbds
 │   └── plans/                      # this file
@@ -113,56 +118,69 @@ skald/
 
 ```
 GUI (main_window) ──┐
-                    ├──> playback_controller (Protocol) ──> player.py ──> libmpv
-TUI (player_tui) ───┤                                    │
-CLI commands ───────┘                                    │
-                                                         │
-mpris_linux / smtc_windows ──> playback_controller ──────┘ (subscribes via signals)
+                    ├──> playback_controller (Protocol+listeners)
+TUI (cli/play.py) ──┤        │
+CLI commands ───────┘        │ owns ↓
+                             player.py ──> libmpv
+                             
+integration/mpris.py ──┐
+                       ├─── add_listener(controller, on_state_change)
+integration/smtc.py  ──┘
 
 scanner ──> metadata + covers + chapters ──> library (DB)
                                                   │
 positions / bookmarks ────────────────────────────┤
                                                   ▼
-                                          SQLite (WAL mode)
+                                          SQLite (WAL mode; threading.local; file lock)
 
-settings.py ──> config.toml
-logging_setup ──> rotating log file
-paths.py ──> platformdirs
+settings.py (pydantic-settings) ──> config.toml
+logging_setup.py (dictConfig) ──> rotating log file
+paths.py (platformdirs → pathlib.Path)
 ```
+
+Boundary rules enforced by `import-linter` in CI:
+
+- `cli/`, `library.py`, `playback_controller.py`, `player.py` must not import from `gui/` or `PySide6.QtWidgets`/`QtGui`
+- `integration/mpris.py` must not import `winrt`; `integration/smtc.py` must not import `dbus_fast`
 
 ### Key version pins
 
 | Package | Pin | Why |
 |---|---|---|
-| Python | `>=3.12,<3.14` | CI matrix target; matches Ubuntu 22.04 + Windows runners |
+| Python | `>=3.12,<3.15` | Dev tested on 3.14; supported floor 3.12 (covers Ubuntu 22.04 if needed) |
 | `PySide6` | `>=6.7,<7.0` | `styleHints().colorScheme()` stable; `colorSchemeChanged` signal |
+| `PySide6-stubs` | latest (dev) | mypy-friendly Qt types |
 | `python-mpv` | `>=1.0.8,<2.0` | Current stable; libmpv 2.x ABI |
-| `mutagen` | `>=1.47` | Current; reads M4B `chpl`, ID3 `CHAP` |
+| `mutagen` | `>=1.47` | Reads M4B `chpl`, ID3 `CHAP` |
 | `platformdirs` | `>=4.3` | Stable API with `ensure_exists` kwarg |
+| `pydantic-settings` | `>=2.5` | Typed settings; TOML source via `tomllib` |
 | `typer` | `>=0.12,<1.0` | Click 8.1+ floor |
-| `rich` | `>=13` | TUI rendering for `skald play` |
+| `rich` | `>=13` | TUI rendering for `cli/play.py` |
 | `dbus-fast` | `>=4.0` (Linux extra) | Active fork of dbus-next |
-| `mpris-server` | latest (Linux extra) | Pragmatic MPRIS exposure |
+| `mpris-server` | latest (Linux extra) | MPRIS publisher abstraction |
 | `winrt-Windows.Media` | `>=3.0` (Windows extra) | Own-session SMTC API |
 | `winrt-Windows.Media.Control` | `>=3.0` (Windows extra) | Control API |
 | `winrt-Windows.Storage.Streams` | `>=3.0` (Windows extra) | Thumbnail streams |
 | `pyinstaller` | `>=6.10` | Built-in PySide6 hook through 6.8 |
-| `ruff`, `black`, `mypy`, `pre-commit`, `pytest` | latest | Dev only |
+| `ruff`, `black`, `mypy`, `pre-commit`, `pytest`, `pytest-qt`, `import-linter` | latest (dev) | Quality bar |
 
-Linux extras (`pip install skald[linux]`) and Windows extras (`pip install skald[windows]`) gate the OS-specific deps; the OS-detection wrapper at runtime only imports the relevant integration module.
+Linux extras (`pip install skald[linux]`) and Windows extras (`pip install skald[windows]`) gate OS-specific deps. The OS-detection wrapper at runtime only imports the relevant integration module.
 
 ### Non-negotiable cross-stack rules
 
-1. **The libmpv locale fix.** In `app.py`, *immediately* after `from PySide6 import ...` and *before* the first `mpv.MPV(...)`:
+1. **The libmpv locale fix lives at the top of `skald/__main__.py`** — before any other import. Qt clobbers `LC_NUMERIC` on import and libmpv parses numeric properties with the C locale; failure mode is silent on non-English systems. The CLI / TUI / GUI all enter through `__main__.py` so all three paths get the fix:
    ```python
+   # src/skald/__main__.py — first 4 lines
    import locale
    locale.setlocale(locale.LC_NUMERIC, "C")
+   import sys
+   from skald.cli import app
    ```
-   Qt clobbers `LC_NUMERIC` on import; libmpv parses numeric properties with the C locale and fails silently on non-English systems otherwise.
+   `player.py` asserts the fix is active in its constructor: `assert locale.getlocale(locale.LC_NUMERIC)[0] in (None, "C"), "..."`. A unit test imports each entry path and verifies the locale.
 
-2. **python-mpv → Qt thread marshalling.** Property observers and event callbacks fire on python-mpv's event thread. Never touch widgets from them. Pattern: each observer emits a `Signal` on a `QObject` that lives on the main thread; the slot does the UI work.
+2. **python-mpv → main-thread marshalling via callbacks.** python-mpv property observers and event callbacks fire on the engine's event thread. `player.py` exposes a transport-agnostic `add_listener(callback)` API. The GUI wraps that with a `QObject.Signal` *at the boundary* (`PlayerSignals(QObject)` in `gui/app.py`); the CLI/TUI uses callbacks directly. Never put `QObject.Signal` into `player.py` or `playback_controller.py` — that would force Qt into non-GUI code paths.
 
-3. **`player.terminate()` explicitly at shutdown.** Relying on `__del__`/GC deadlocks on exit while the event thread is alive. Hook into `QApplication.aboutToQuit`.
+3. **`player.terminate()` explicitly on `aboutToQuit`.** Relying on `__del__`/GC deadlocks at shutdown while the event thread is alive. Hook into `QApplication.aboutToQuit` (GUI) and `atexit` (CLI).
 
 4. **SQLite WAL pragmas on every connection** (set in `db/connection.py`):
    ```sql
@@ -175,200 +193,291 @@ Linux extras (`pip install skald[linux]`) and Windows extras (`pip install skald
    ```
    The library DB must live on a local filesystem (WAL silently corrupts on NFS/SMB). Media files can be on a NAS — only the DB path is constrained.
 
-5. **Qt 6 HiDPI is default-on.** Do not set `Qt.AA_EnableHighDpiScaling` — it's deprecated and a no-op in Qt 6. Use `QFontMetrics` for sizing and SVG icons.
+5. **Qt 6 HiDPI is default-on.** Do not set the deprecated `Qt.AA_EnableHighDpiScaling`. Use `QFontMetrics` for sizing and SVG icons.
 
-6. **`app.setStyle("Fusion")` before loading QSS.** PySide6 wheels on Linux ship without native platform theme plugins; default is Windows-95-ish. Fusion is the safe baseline that QSS layers cleanly on top of.
+6. **`app.setStyle("Fusion")` before loading QSS.** PySide6 wheels on Linux ship without native platform theme plugins; Fusion is the safe baseline that QSS layers cleanly on top of.
 
-7. **PyInstaller `--onedir`, never `--onefile`.** Onefile extracts to `%TEMP%` every launch (2–5s startup hit) and triggers Windows antivirus heuristics. Inno Setup wraps the onedir output into the single `.exe` installer.
+7. **PyInstaller `--onedir`, never `--onefile`.** Onefile extracts to `%TEMP%` on every launch (2–5s startup hit) and triggers Windows antivirus heuristics. Inno Setup wraps the onedir output into a single `.exe` installer.
 
-8. **Single-instance dance.** Always call `QLocalServer.removeServer("skald-singleton")` before `QLocalServer.listen(...)`. Crash-leftover socket files on Unix block startup otherwise.
+8. **Single-instance via `QLocalServer` with `UserAccessOption` and a `user_runtime_dir` socket path with 0700 perms.** Always call `QLocalServer.removeServer(name)` before `listen(...)`. Crash-leftover socket files on Unix block startup otherwise. Default Linux behavior leaves the socket world-accessible — without `UserAccessOption`, another local user can intercept second-launch CLI args.
+
+9. **All SQL uses `?` parameter binding.** No f-strings, `.format()`, or `+` concatenation in any query. `ruff` rule `S608` (`hardcoded-sql-expression`) is enabled in `pyproject.toml`. CI greps for `f"…(SELECT|INSERT|UPDATE|DELETE)…"` patterns under `src/` and fails the build on any hit.
+
+10. **SQLite connection per thread.** `db/connection.py` keeps a per-thread connection in `threading.local()`. Background scanner thread gets its own connection; main thread gets its own. Never share.
+
+11. **Connections take a file lock on `library.db.lock`** before any SQL (Unix `fcntl.flock`, Windows `msvcrt.locking`, abstracted). Migration acquires exclusively; normal ops shared. This covers the pre-Qt startup window where the Qt single-instance gate isn't yet up.
+
+12. **`validate_media_path()` for every externally-supplied path** — CLI args, `QLocalSocket` second-launch handoff, file-association entry. Library-internal playback (DB-sourced paths) bypasses it.
 
 ### Implementation Phases
 
-The phasing honors the user's global preference (CLAUDE.md): "Start every project as a single working file that proves the core concept." Phase 0 is that file; Phases 1+ scaffold into the layout above.
+Honors the user's global preference: "Start every project as a single working file that proves the core concept." Phase 0 is that file; Phases 1+ scaffold into the layout above.
 
 #### Phase 0 — Single-file spike (½ day)
 
 **Goal:** Prove the toolchain works end-to-end on Linux before scaffolding anything.
 
-**Deliverable:** `spike.py` — a single Python file that, with `python -m skald` not yet wired up:
-- Imports PySide6, applies the `LC_NUMERIC=C` fix
-- Loads a real audiobook from a hardcoded path via python-mpv (audio-only)
+**Deliverable:** `spike.py` (at repo root, gitignored or kept as historical reference) — a single Python file that:
+- Imports `PySide6` then immediately applies `locale.setlocale(locale.LC_NUMERIC, "C")`
+- Loads a real audiobook from `/hoard/books/audio` (sampling a small one) via python-mpv
 - Prints chapter list, current chapter, time-pos every second
-- Accepts `p`/`s`/`+`/`-`/`q` keystrokes for pause/seek/speed/quit
+- Accepts `p`/`s`/`+`/`-`/`q` keystrokes for pause/seek-back/speed-up/speed-down/quit (via `readchar` or stdin loop)
 - Calls `player.terminate()` on exit
 
-**Success criterion:** Plays an `.m4b` from `~/Audiobooks/` to completion on Arch Linux with chapter detection working. **Discard or recycle** into `core/player.py` afterward — not committed to `main` as-is.
+**Success criterion:** Plays an `.m4b` from `/hoard/books/audio` to a few minutes in with chapter detection working. **Discard or recycle** into `player.py` — not committed to `main` as-is (kept in a `spike/` directory or git-ignored after Phase 1 lands).
 
 #### Phase 1 — Project skeleton + quality bar (1 day)
 
-- Create the `src/skald/` layout above (empty modules with TODO comments are fine)
-- `pyproject.toml` with all version pins from the table above, including `[project.optional-dependencies]` for `linux` and `windows`
-- `.pre-commit-config.yaml` with `ruff` (lint + format), `mypy` (strict-ish), `pyupgrade`
-- `pre-commit install` runs hook on commit
-- `core/paths.py` — thin `platformdirs` wrappers (`data_dir()`, `config_path()`, `log_dir()`, `covers_dir()`)
-- `core/logging_setup.py` — `RotatingFileHandler`, 5 files × 5 MB, `--debug` flag switches level
-- `core/settings.py` — `tomllib` (read) + `tomli_w` (write) wrapper around `config.toml`; writes commented defaults on first run
-- `db/schema.py` — initial schema as `MIGRATIONS = ["CREATE TABLE ...", ...]`; `apply_migrations(conn)` uses `PRAGMA user_version`
-- `db/connection.py` — `get_connection()` applies the WAL pragmas every open
-- `pytest` config with `tests/fixtures/` placeholder
-- `tests/unit/test_settings.py`, `test_paths.py`, `test_migrations.py` — first passing tests
+- Create the `src/skald/` flat layout above (modules with `raise NotImplementedError` placeholders and full type signatures — forces design before implementation)
+- `pyproject.toml` with all version pins, `[project.optional-dependencies]` for `linux` / `windows` / `dev`
+- `.pre-commit-config.yaml` with `ruff` (lint + format), `mypy` (strict-ish), `pyupgrade`, `lint-imports`
+- `pre-commit install` runs hooks on commit
+- `paths.py` — thin `platformdirs` wrappers (`data_dir()`, `config_path()`, `db_path()`, `log_dir()`, `covers_dir()`, `thumbnails_dir()`, `runtime_dir()`). **All return `pathlib.Path`, never `str`.**
+- `errors.py` — exception hierarchy: `SkaldError` base, `PlayerError`, `LibraryError`, `MigrationError`, `MetadataError`
+- `logging_setup.py` — `logging.config.dictConfig` with a dict literal; `RotatingFileHandler` 5 files × 5 MB; `--debug` flag switches level
+- `settings.py` — `pydantic-settings` `BaseSettings` reading `config.toml` via the `tomllib` source. Default values defined as class attributes. Ship `src/skald/resources/config.default.toml` (commented) — copied to user dir on first run (`tomli_w` strips comments, so static template is the only way to preserve them)
+- `validation.py` — `validate_media_path(p) -> Path` (resolve strict, extension allowlist `{".mp3",".m4a",".m4b",".ogg",".opus",".flac",".wav"}`, file-not-dir check)
+- `time_util.py` — `ms_to_human(ms) -> "1:23:45"`, `human_to_ms(s) -> int`
+- `db/connection.py` — `get_connection()` returns `threading.local()` connection; applies WAL pragmas on first acquire; acquires file lock on `library.db.lock`
+- `db/migrations.py` — loads `.sql` files from `db/migrations/`, sorted by leading number; for each version > `user_version`, runs in manual `BEGIN`/.../`PRAGMA user_version = N`/`COMMIT` transaction (NOT `executescript()`). Pre-flight: refuses to open DB where `user_version > EXPECTED_VERSION`. Online-backup before any migration via `Connection.backup()`; rotates 3 backups.
+- `db/migrations/0001_initial.sql` — the initial schema (below)
+- `tests/conftest.py` — session-scoped fixtures generate audio via `ffmpeg` (sine MP3, M4B with chapter, three-track folder); no binaries committed
+- `tests/unit/` — `test_settings.py`, `test_paths.py`, `test_validation.py`, `test_migrations.py`, `test_locale_init.py` (asserts LC_NUMERIC=C after importing each entry path)
+- `import-linter` config in `pyproject.toml` enforcing boundary rules above
 
-**Schema v1 (single migration to start):**
+**Schema v1 — `db/migrations/0001_initial.sql`:**
 
 ```sql
+CREATE TABLE _migrations (
+    version    INTEGER PRIMARY KEY,
+    name       TEXT    NOT NULL,
+    checksum   TEXT    NOT NULL,
+    applied_at INTEGER NOT NULL
+);
+
 CREATE TABLE books (
-    id              INTEGER PRIMARY KEY,
-    path            TEXT NOT NULL UNIQUE,    -- folder or single-file path
-    kind            TEXT NOT NULL CHECK (kind IN ('folder', 'file')),
-    title           TEXT NOT NULL,
-    author          TEXT,
-    narrator        TEXT,
-    series          TEXT,
-    series_index    REAL,
-    description     TEXT,
-    duration_s      REAL,
-    added_at        INTEGER NOT NULL,        -- unix seconds
-    last_played_at  INTEGER,
-    status          TEXT NOT NULL DEFAULT 'present'  -- 'present' | 'missing'
+    id               INTEGER PRIMARY KEY,
+    book_uuid        TEXT    NOT NULL UNIQUE,
+    path             TEXT    NOT NULL UNIQUE,
+    kind             TEXT    NOT NULL CHECK (kind IN ('folder', 'file')),
+    title            TEXT    NOT NULL,
+    author           TEXT,
+    narrator         TEXT,
+    series           TEXT,
+    series_index     REAL,
+    description      TEXT,
+    duration_ms      INTEGER,
+    cover_path       TEXT,
+    added_at         INTEGER NOT NULL,
+    last_played_at   INTEGER,
+    status           TEXT    NOT NULL DEFAULT 'present'
+                     CHECK (status IN ('present', 'missing', 'archived'))
 );
+
 CREATE TABLE tracks (
-    id              INTEGER PRIMARY KEY,
-    book_id         INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
-    path            TEXT NOT NULL,
-    order_index     INTEGER NOT NULL,
-    duration_s      REAL
+    id             INTEGER PRIMARY KEY,
+    book_id        INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    path           TEXT    NOT NULL,
+    order_index    INTEGER NOT NULL,
+    duration_ms    INTEGER,
+    file_mtime     INTEGER NOT NULL
 );
+
 CREATE TABLE positions (
-    book_id         INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
-    seconds         REAL NOT NULL,
-    updated_at      INTEGER NOT NULL
+    book_id      INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+    position_ms  INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL
 );
+
 CREATE TABLE bookmarks (
-    id              INTEGER PRIMARY KEY,
-    book_id         INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
-    seconds         REAL NOT NULL,
-    note            TEXT,
-    created_at      INTEGER NOT NULL
+    id           INTEGER PRIMARY KEY,
+    book_id      INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    position_ms  INTEGER NOT NULL,
+    note         TEXT,
+    created_at   INTEGER NOT NULL
 );
+
 CREATE TABLE metadata_overrides (
-    book_id         INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
-    title           TEXT,
-    author          TEXT,
-    narrator        TEXT,
-    series          TEXT,
-    series_index    REAL,
-    description     TEXT,
-    cover_overridden INTEGER NOT NULL DEFAULT 0
+    book_id           INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+    title             TEXT,
+    author            TEXT,
+    narrator          TEXT,
+    series            TEXT,
+    series_index      REAL,
+    description       TEXT,
+    cover_overridden  INTEGER NOT NULL DEFAULT 0
 );
+
 CREATE TABLE watched_folders (
-    id              INTEGER PRIMARY KEY,
-    path            TEXT NOT NULL UNIQUE
+    id               INTEGER PRIMARY KEY,
+    path             TEXT    NOT NULL UNIQUE,
+    enabled          INTEGER NOT NULL DEFAULT 1,
+    last_scanned_at  INTEGER
 );
+
 CREATE INDEX idx_books_last_played ON books(last_played_at DESC);
-CREATE INDEX idx_books_status      ON books(status);
 CREATE INDEX idx_tracks_book       ON tracks(book_id, order_index);
+CREATE INDEX idx_bookmarks_book    ON bookmarks(book_id, position_ms);
 ```
 
-**Acceptance:** `pre-commit run --all-files` passes; `pytest` passes; `skald --version` prints version.
+Notes on the schema:
 
-#### Phase 2 — Audio engine + chapters + position memory (1–2 days)
+- **Time fields are INTEGER milliseconds**, not REAL seconds. Avoids float-equality bugs in queries; matches what libmpv's `time-pos * 1000` rounds to.
+- **`book_uuid` is the stable identity** — assigned on first scan, persisted to a `.skald.json` sidecar file in the book folder (or alongside a single-file book). Survives folder renames. Scanner matches: (1) sidecar UUID, (2) fingerprint `sha256(first 64 KiB of first track + duration_ms)`, (3) fall back to `path`.
+- **`status` has a CHECK constraint** including `'archived'` (soft-delete future use).
+- **`tracks.file_mtime`** lets the scanner detect external re-tagging and re-extract metadata.
+- **`metadata_overrides` stays as a separate table** — makes "reset to embedded metadata" a clean `DELETE FROM metadata_overrides WHERE book_id=?`. Reads always use `COALESCE(o.field, b.field)` via a single repository helper (`library.get_book(book_id)`) so no caller forgets the COALESCE.
+- **`books.cover_path`** is the canonical pointer (may be inside the user's media folder, our covers dir, or our thumbnails dir, depending). The 360px thumbnail lives at `<thumbnails_dir>/<book_uuid>.jpg`.
+- **`_migrations` audit table** alongside `PRAGMA user_version` gives ordering, names, timestamps, and checksums for debuggability.
+- **No `idx_books_status`** — two-value low-cardinality column doesn't benefit from a btree.
 
-- `core/player.py` — wraps `mpv.MPV(vo='null', ytdl=False, audio_pitch_correction=True)`; exposes `play(path)`, `pause()`, `resume()`, `seek(s, relative)`, `set_speed(s)`, `position`, `chapter_index`, `chapter_list`. Observers (`time-pos`, `chapter`, `end-file`) emit `QObject.Signal` instances; constructors take an `event_dispatch: Callable` so the CLI mode can use a different dispatch (asyncio or simple callback).
-- `core/chapters.py` — `extract_chapters(path) -> list[Chapter]`. Order: (1) mutagen MP4 `chpl`, (2) mutagen ID3 `CHAP`, (3) on `MP4` returning empty, fall back to `mpv.chapter_list` (handles MP4 chapter-text-tracks that mutagen issue #530 doesn't), (4) folder-of-files → one chapter per track using filename or `TIT2`.
-- `core/positions.py` — `read(book_id) -> float | None`; `write(book_id, seconds)`. Hooked into player events: write every 5s while playing **plus** on pause / seek / chapter change / app exit / focus loss.
-- `tests/integration/test_playback.py` — uses `tests/fixtures/short.mp3` (≤5s, LibriVox public-domain snippet, ~50 KB) and `short.m4b` (with one chapter). Asserts: load, play, position advances, seek works, speed sets, chapter list returns, terminate is clean.
+**Acceptance:** `pre-commit run --all-files` passes; `pytest` passes; `skald --version` prints version; `mypy src/skald` clean; `lint-imports` clean.
 
-**Acceptance:** Can play a fixture file headlessly via `python -c "from skald.core.player import Player; ..."`. Position persists across player restarts within tests. `player.terminate()` returns cleanly under pytest.
+#### Phase 2 — Audio engine + chapters + position memory (1.5 days)
 
-#### Phase 3 — Library scanner + metadata + covers (1–2 days)
+- `player.py` — wraps `mpv.MPV(vo='null', ytdl=False, audio_pitch_correction=True)`; exposes `play(path)`, `pause()`, `resume()`, `seek(s, relative)`, `set_speed(s)`, `position`, `chapter_index`, `chapter_list`, `terminate()`, `add_listener(cb) / remove_listener(cb)`. Observers (`time-pos`, `chapter`, `end-file`) call all registered listeners with a `PlayerEvent` value object. **No Qt imports in this file.**
+- `playback_controller.py` — `Protocol` with `play / pause / next_chapter / prev_chapter / seek_relative / set_speed / get_state / add_listener / remove_listener`. Value object:
+  ```python
+  @dataclass(frozen=True, slots=True)
+  class PlaybackState:
+      position_ms: int
+      duration_ms: int
+      title: str
+      chapter_title: str | None
+      cover_path: Path | None
+      is_playing: bool
+      speed: float
+  ```
+- `chapters.py` — `extract_chapters(path) -> list[Chapter]`. Order: (1) mutagen MP4 `chpl`, (2) mutagen ID3 `CHAP`, (3) `mpv.chapter_list` fallback (handles MP4 chapter-text-tracks that mutagen issue #530 misses), (4) folder-of-files → one chapter per track using filename or `TIT2`.
+- `positions.py` — `read(book_id) -> int | None` (ms), `write(book_id, ms)`. Periodic writer is a `QTimer` (or `threading.Timer` in CLI) that runs every 5s **only while playback is active** — stops on pause; resumes on play. Event-driven writes always fire (pause, seek, chapter change, app exit, focus loss).
+- `tests/integration/test_playback.py` — uses the conftest-generated fixtures. Asserts: load, play, position advances, seek works, speed sets, chapter list returns, terminate is clean.
 
-- `core/scanner.py` — `scan(folder: Path) -> list[BookCandidate]`. Heuristics (from research):
-  - Walk `folder` recursively, but **treat the first directory containing audio files as the book**; do not recurse below it.
-  - Detect `CD01/`, `disc 1/`, `cd1/` (case-insensitive regex) subfolders and group them as one book.
-  - Track ordering: if all tracks have `track` tags forming a perfect 1..N, use that; else natural-sort by filename.
-  - A single `.m4b` / `.m4a` / `.mp3` file in a watched folder is a book.
-- `core/metadata.py` — extract from (1) embedded tags (mutagen), (2) folder/filename pattern `Author/Book` or `Author - Book`, (3) overrides table (final word). Title falls back to folder name.
-- `core/covers.py` — extract embedded cover (`APIC` for ID3, `covr` for MP4) or `cover.jpg` / `folder.jpg` in the book folder; write to `<data_dir>/covers/<book_id>.jpg`. User uploads overwrite the same file and set `metadata_overrides.cover_overridden = 1`.
-- Missing-file handling: on rescan, books whose `path` no longer exists get `status = 'missing'` (never deleted). Re-detected paths reset to `'present'`.
-- Tests: scanner on a fixture tree (`folder_book/` with 3 MP3s + a CD-style fixture + a standalone .m4b), metadata extraction round-trip, override application order.
+**Acceptance:** Can play a fixture file headlessly via `python -c "from skald.player import Player; ..."`. Position persists across restarts within tests. `player.terminate()` returns cleanly under pytest.
 
-**Acceptance:** `scan()` returns the right number of books for each fixture topology; metadata overrides take precedence over embedded; missing books survive rescans with state intact.
+#### Phase 3 — Library scanner + metadata + covers (1.5 days)
+
+- `scanner.py` — `scan(folder: Path)` runs on a `QThread` (or background thread in CLI). Emits incremental signals: `progress(done, total, current_folder)`, `book_discovered(book_id)`, `finished(added, missing)`. Heuristics:
+  - `os.walk(folder, followlinks=False)`; deduplicate by `(st_dev, st_ino)`; max depth 8; max files per book 500
+  - Every path goes through `Path.resolve(strict=True)` and `is_relative_to(watched_root.resolve())` — refuses paths that escape the watched root via symlinks
+  - First directory containing audio files = the book; do not recurse below
+  - Detect `CD01/`, `disc 1/`, `cd1/` (case-insensitive) subfolders and group as one book
+  - Track ordering: perfect 1..N `track` tags wins; else natural-sort by filename
+  - A single `.m4b` / `.m4a` / `.mp3` in a watched folder is a book
+  - Identity via sidecar `.skald.json` UUID → fingerprint → path
+- `metadata.py` — extract from (1) embedded tags via mutagen, (2) folder/filename pattern `Author/Book` or `Author - Book`, (3) `metadata_overrides` (wins). Title falls back to folder name. Re-extracts on `file_mtime` change.
+- `covers.py` — extract embedded cover (`APIC` for ID3, `covr` for MP4) or `cover.jpg` / `folder.jpg` in the book folder; write original to `<covers_dir>/<book_uuid>.jpg`; write 360px thumbnail (2× for HiDPI) to `<thumbnails_dir>/<book_uuid>.jpg`. User uploads (Phase 7) re-encode through `QImageReader` with allocation limit before writing.
+- Missing-file handling: books whose `path` no longer resolves get `status = 'missing'` (never deleted). Re-detected paths reset to `'present'`.
+- Tests: scanner on a fixture tree (folder_book + standalone .m4b + CD-style fixture + symlink-loop fixture), metadata extraction round-trip, override application order, symlink-loop guard.
+
+**Acceptance:** `scan()` returns the right number of books for each fixture topology; metadata overrides take precedence over embedded; missing books survive rescans with state intact; symlink loop does not hang.
 
 #### Phase 4 — CLI (1 day)
 
-- `cli/__init__.py` — Typer app, global `--debug` flag wires `logging_setup`
-- `cli/play.py` — Headless TUI player using `rich.live` for the progress bar + chapter + speed + time. Keystroke handling via `readchar` or `prompt_toolkit` (decide at impl time; `readchar` is simpler if no fancy input is needed). Keybindings match the GUI table from Q15 where applicable.
-- `cli/scan.py` — Adds folder to `watched_folders`, scans, prints summary
-- `cli/list_cmd.py` — Prints library as a table (rich.table), filterable with `--status`, `--author`, `--sort`
-- Single-instance check: `core/single_instance.py` exposes `gui_is_running() -> bool` via a lockfile or socket-probe; `skald play` refuses if the GUI is up, printing the future `--isolated` hint per Q27
+- `cli/__init__.py` — Typer app; global `--debug` flag wires `logging_setup.configure_logging(debug=True)`
+- `cli/play.py` — Headless TUI player using `rich.live` for the progress bar + chapter + speed + time display. Keystroke handling via `readchar` (simpler than prompt_toolkit; no async). Calls `validate_media_path()` on the argument. Bindings match the GUI table where applicable. The TUI IS the play command — no separate `tui/` directory.
+- `cli/scan.py` — Adds folder to `watched_folders`, runs scanner, prints summary
+- `cli/library.py` — Prints library as a `rich.table.Table`; `--status`, `--author`, `--sort` filters
+- Single-instance gate: `single_instance.py` exposes `gui_is_running() -> bool` via a `QLocalSocket` connect probe (atomic, self-healing). `cli/play.py` refuses if a GUI is up, printing the future `--isolated` hint
 - Tests for argument parsing and command dispatch
 
-**Acceptance:** `skald --help`, `skald scan ~/Audiobooks`, `skald list`, and `skald play <path>` all work; refusal message fires when a (mocked) GUI lock exists.
+**Acceptance:** `skald --help`, `skald scan ~/Audiobooks`, `skald library`, and `skald play <path>` all work; refusal message fires when a (mocked) GUI is up.
 
-#### Phase 5 — GUI shell + theme + single-instance (2–3 days)
+#### Phase 5 — GUI shell + theme + single-instance (2.5 days)
 
-- `gui/app.py` — `QApplication` setup: locale fix, `app.setStyle("Fusion")`, single-instance gate (`QLocalServer` / `QLocalSocket`, args forwarding on second-launch), translator install, theme load
-- `gui/main_window.py` — Top-level window: a `QSplitter(Qt.Horizontal)` containing the library panel (left) and a `QStackedWidget` (right) for library / book-detail switching. The bottom player bar is a separate widget added to a vertical `QVBoxLayout` outside the splitter, so it's always visible. Library-pane collapse via stored `sizes` + `setSizes([0, total])`.
+- `gui/app.py` — `QApplication` setup (locale fix is already done in `__main__.py`): `app.setStyle("Fusion")`, single-instance gate (`QLocalServer` with `UserAccessOption`, socket in `runtime_dir()` with 0700; second-launch forwarding via `QLocalSocket`), translator install (BEFORE any widget construction), theme load, `QPixmapCache.setCacheLimit(64 * 1024)`
+- `gui/main_window.py` — Top-level window: `QSplitter(Qt.Horizontal)` containing the library panel (left) and a `QStackedWidget` (right) for library / book-detail switching. Persistent bottom player bar in a vertical `QVBoxLayout` outside the splitter. Library-pane collapse via stored `sizes` + `setSizes([0, total])` (never `hide()` — that loses splitter geometry). UI state (splitter sizes, last-used view mode, window geometry) lives in `QSettings`, not `config.toml` or SQLite.
 - Toolbar with hamburger button (toggle library pane), theme selector, settings button
-- `gui/player_bar.py` — Cover thumbnail, title/chapter label, transport buttons (prev-chapter, back-30, play/pause, forward-30, next-chapter), seek slider, time labels, speed control, volume control, sleep timer button
-- `gui/theme.py` — Loads `themes/dark.qss.tmpl` / `light.qss.tmpl` and string-formats with the accent color `#C45A3A` and computed contrasts. `apply_theme(name)` reloads + walks widgets calling `style().unpolish/polish()` for any with dynamic state properties. Listens to `app.styleHints().colorSchemeChanged` when `theme=auto` is in config.
-- Keyboard shortcuts wired per Q15 table
-- Tests: `pytest-qt`-light spot checks (skipped if `pytest-qt` unavailable) for "splitter collapses on toggle" and "theme switch doesn't crash"
+- `gui/player_bar.py` — Cover thumbnail, title/chapter label, transport buttons (prev-chapter, back-10, play/pause, forward-30, next-chapter), seek slider, time labels, speed control, volume control, sleep timer button
+- `gui/theme.py` — Loads `resources/themes/dark.qss.template` / `light.qss.template`. Substitution via `string.Template` (`$accent`, `$bg`, etc.) — NOT `str.format` (collides with QSS's `{` selectors). `apply_theme(name)` reloads + walks widgets calling `style().unpolish/polish()` for any with dynamic state properties. Listens to `app.styleHints().colorSchemeChanged` when `theme=auto`.
+- `gui/app.py` bridges `player`'s listener callbacks to Qt signals via a single boundary `QObject` (`PlayerSignals`) so widgets connect normally
+- Defer OS-specific imports: `from skald.integration import init_media_keys; init_media_keys(controller)` inside that function does the `if sys.platform == "linux": from skald.integration.mpris import ...` lazy import
+- Keyboard shortcuts wired per Q15 brainstorm table
+- Tests: `pytest-qt` spot checks for "splitter collapses on toggle" and "theme switch doesn't crash"
 
 **Acceptance:** GUI launches, library pane collapses and restores, theme switch (dark/light/follow-system) works without restart, second launch focuses the existing window.
 
 #### Phase 6 — GUI library view (2 days)
 
 - `gui/library_view.py` — Two visual modes backed by a single `QAbstractListModel`:
-  - **Grid:** `QListView.setViewMode(IconMode)` + custom `QStyledItemDelegate` painting cover (square aspect, max ~180px), title, author, progress bar
+  - **Grid:** `QListView.setViewMode(IconMode)` + custom `QStyledItemDelegate` painting cover thumbnail (from `<thumbnails_dir>/<book_uuid>.jpg`, never the original — that's only loaded in detail view), title, author, progress bar
   - **List:** `QTableView` with sortable columns (Title, Author, Length, Progress, Last Played)
-- Toggle button in toolbar swaps mode; choice persists in `config.toml`
+  - `QListView.setUniformItemSizes(True)` + `setLayoutMode(Batched)` for grid scroll perf
+- The delegate must not do I/O. `QPixmapCache` (64 MB) caches loaded thumbnails by `book_uuid`. A `QThreadPool` background-loads any cache misses triggered by scroll visibility.
+- Toggle button in toolbar swaps mode; choice persists in `QSettings`
 - Sort menu (5 sort orders), filter dropdown (`All / In Progress / Finished / Not Started`)
-- Empty state: prominent "Add folder" button + helper text describing the layouts (per Q16)
-- Prominent "Continue listening" tile at the top of the library when there's a last-played book — selecting it opens the book detail view (does **not** auto-play)
+- Empty state: prominent "Add folder" button + helper text describing supported folder layouts (Q16)
+- "Continue listening" tile at the top of the library when there's a last-played book — selecting opens the book detail view (does **not** auto-play)
 - Tests: model produces the right row counts under each filter
 
-**Acceptance:** Library renders grid and list, sort/filter work, "Add folder" picker pre-fills `~/Audiobooks` (Linux) / `%USERPROFILE%\Audiobooks` (Windows) and offers to mkdir if missing.
+**Acceptance:** Library renders grid and list, sort/filter work, "Add folder" picker pre-fills `~/Audiobooks` / `%USERPROFILE%\Audiobooks` and offers to mkdir if missing. Grid scrolls smoothly at 500 books.
 
-#### Phase 7 — GUI book detail + dialogs (2–3 days)
+#### Phase 7 — GUI book detail + dialogs (2.5 days)
 
-- `gui/book_detail.py` — Large cover (left), metadata block (title, author, narrator, duration, % complete, description), big Play/Resume button, chapter list (`QListWidget`, click to jump), bookmarks list with add/edit/delete, Edit-metadata button
-- `gui/dialogs/edit_metadata.py` — Editable fields for title, author, narrator, series, description; saves to `metadata_overrides`
-- `gui/dialogs/cover_upload.py` — File picker for JPG/PNG; drag-and-drop also accepted on the cover widget; writes to `<data_dir>/covers/<book_id>.jpg` and sets `cover_overridden = 1`
-- `gui/dialogs/sleep_timer.py` — Radio buttons: 15/30/45/60 min, "End of chapter", custom minutes. Sleep tick implemented as a `QTimer`; on fire, calls `player.pause()`
+- `gui/book_detail.py` — Large cover (loaded from `<covers_dir>`, not the thumbnail), metadata block, big Play/Resume button, chapter list (`QListWidget`, click to jump), bookmarks list with add/edit/delete, Edit-metadata button
+- `gui/dialogs.py` — Three dialog classes in a single file (split when it exceeds ~300 lines):
+  - `EditMetadataDialog` — fields for title/author/narrator/series/description; saves to `metadata_overrides`
+  - `CoverUploadDialog` — file picker + drag-and-drop. **Re-encodes via `QImageReader` with `setAllocationLimit(64)` MB**, clamps dimensions to 4096×4096, file size cap 10 MB pre-decode, accepts JPEG/PNG only, writes JPEG quality 85 to `<covers_dir>/<book_uuid>.jpg` (strips EXIF/ICC). Never stores user bytes verbatim. Sets `metadata_overrides.cover_overridden = 1`. Also re-generates the thumbnail.
+  - `SleepTimerDialog` — radio buttons (15/30/45/60 min, end-of-chapter, custom); on fire, `QTimer` calls `player.pause()`
 - Bookmarks: add at current position (key `B`), edit note inline, delete with confirmation
-- Tests: metadata override round-trip; cover replace overwrites prior file; sleep timer pauses player at expiry (use `qtbot.wait`)
+- Tests: metadata override round-trip; cover replace overwrites prior file; sleep timer pauses player at expiry (`qtbot.wait`)
 
-**Acceptance:** Editing metadata, uploading a cover, adding bookmarks, and triggering a sleep timer all work end-to-end.
+**Acceptance:** Editing metadata, uploading a cover (including a malformed image rejection path), adding bookmarks, and triggering a sleep timer all work end-to-end.
 
-#### Phase 8 — OS integration: media keys + file associations (2–3 days)
+#### Phase 8 — OS integration: media keys + file associations (2.5 days)
 
-- `core/playback_controller.py` — `Protocol` class with `play() / pause() / next_chapter() / prev_chapter() / seek_relative(s)` and a `state_changed` Qt signal carrying `PlaybackState` (a `dataclass`: position, duration, title, chapter, cover_path, is_playing, speed). Implemented by a `MainPlaybackController` that wraps `core/player.py` + library lookups.
-- `integration/mpris_linux.py` — `mpris_server`-backed adapter. Bus name `org.mpris.MediaPlayer2.skald`. Runs on a `QThread` driving `dbus-fast`'s asyncio loop, or via `qasync` if simpler. Imported only when `sys.platform == "linux"`.
-- `integration/smtc_windows.py` — Uses `winrt-Windows.Media.SystemMediaTransportControls`. The HWND interop is the gnarly part: `ISystemMediaTransportControlsInterop::GetForWindow(HWND)` via ctypes against `Windows.Media.dll`. Pull the HWND from the QMainWindow `winId()`. Updates display via `display_updater.music_properties` and a cover stream via `winrt-Windows.Storage.Streams.RandomAccessStreamReference`. Subscribes to `ButtonPressed`, dispatches by `args.button`.
-- Linux file association via `.desktop` file with `MimeType=audio/mp4;audio/x-m4b;audio/mpeg;application/ogg;` etc.
-- Windows file association handled by Inno Setup `Registry` section (Phase 10)
+- `playback_controller.py` is already defined (Phase 2). `MainPlaybackController` is the production implementation wrapping `Player` + library lookups; subscribes to player events and recomputes `PlaybackState`.
+- `integration/__init__.py` exposes `init_media_keys(controller) -> Adapter`:
+  ```python
+  def init_media_keys(controller: PlaybackController) -> MediaKeyAdapter:
+      if sys.platform == "linux":
+          from skald.integration.mpris import MprisAdapter
+          return MprisAdapter(controller)
+      elif sys.platform == "win32":
+          from skald.integration.smtc import SmtcAdapter
+          return SmtcAdapter(controller)
+      return NullAdapter()
+  ```
+- `integration/mpris.py` — `mpris_server`-backed. Bus name `org.mpris.MediaPlayer2.skald`. Runs on a `QThread` driving `dbus-fast`'s asyncio loop (pick one: not `qasync` for v1 — fewer moving parts). Subscribes to controller `add_listener`. Imports `dbus_fast` / `mpris_server` lazily at adapter construction.
+- `integration/smtc.py` — Uses `winrt-Windows.Media.SystemMediaTransportControls`. HWND interop via `ISystemMediaTransportControlsInterop::GetForWindow(HWND)` through ctypes against `Windows.Media.dll`; HWND from `QMainWindow.winId()`. Updates display via `display_updater.music_properties` and cover via `winrt-Windows.Storage.Streams.RandomAccessStreamReference`. Subscribes to `ButtonPressed`, dispatches by `args.button`.
+- **Throttling**: position updates emit to MPRIS at most every 5s; SMTC `SetTimelineProperties` at most every 5s. Metadata-changed only on actual track/chapter/title/cover change (per MPRIS spec — clients query position, not poll-push).
+- Teardown order: integration adapters unregister bus name / SMTC association *before* `player.terminate()` on `aboutToQuit`. Stale `org.mpris.MediaPlayer2.skald` would otherwise linger on the bus.
+- Linux file association via `packaging/linux/skald.desktop` with `MimeType=audio/mp4;audio/x-m4b;audio/mpeg;application/ogg;` etc. Windows file association handled by Inno Setup (Phase 10).
+- File-association handoff: when the OS hands `skald.exe "C:\path\foo.m4b"` to the running instance via `QLocalSocket`, the receiver decodes the bytes as a single argv (not split on spaces) and routes through `validate_media_path()`.
 - Tests: mock the OS integration adapter; verify the controller forwards play/pause requests correctly
 
 **Acceptance:** GNOME/KDE media keys (and `playerctl`) drive playback on Linux; Windows lock-screen media controls show the book + cover and respond to play/pause.
 
-#### Phase 9 — First-run, accessibility, i18n, update check (1–2 days)
+#### Phase 9 — First-run, accessibility, i18n, update check (1.5 days)
 
-- First-run flow: empty library banner (Q16), pre-filled folder picker, mkdir-if-missing offer
-- i18n scaffolding: all user-facing strings via `self.tr(...)` or `QCoreApplication.translate(...)`; `pyside6-lupdate` extracts to `translations/skald_en.ts`; `pyside6-lrelease` compiles `.qm`. CI step verifies extraction is up to date.
-- Accessibility audit pass: tab order verification, `setAccessibleName` on custom widgets (transport buttons, sleep timer, chapter list), keyboard-only smoke test, run a contrast checker against `#C45A3A` on both themes (adjust shade if needed for WCAG-AA — captured in `tbds.md`)
-- `core/updates.py` — On startup (gated by `config.toml: check_for_updates = true`), HTTPS GET `https://api.github.com/repos/ludothegreat/skald/releases/latest`, compare `tag_name` against `__version__` using `packaging.version.Version`. If newer, show a non-modal banner with a "Open download page" button. Errors are silent (logged).
-- Privacy note added to README explaining the only network call
+- First-run flow: empty library shows a banner with a prominent "Add folder" button (no modal wizard); folder picker pre-filled with `~/Audiobooks` (Linux) or `%USERPROFILE%\Audiobooks` (Windows), offer mkdir-if-missing
+- i18n scaffolding: all user-facing strings via `self.tr(...)` or `QCoreApplication.translate(...)`; `pyside6-lupdate` extracts to `resources/translations/skald_en.ts`; `pyside6-lrelease` compiles `.qm`. CI step verifies extraction is up-to-date. Translator installed in `gui/app.py` *before* any widget construction.
+- Accessibility audit pass: tab order verification, `setAccessibleName` on custom widgets (transport buttons, sleep timer, chapter list), keyboard-only smoke test, contrast checker against `#C45A3A` on both themes (adjust shade if needed for WCAG-AA)
+- `updates.py` — On startup (gated by `config.toml: check_for_updates = true`), HTTPS GET `https://api.github.com/repos/ludothegreat/skald/releases/latest` with:
+  - 5-second timeout
+  - explicit `User-Agent: skald/X.Y.Z`
+  - max 3 redirects
+  - stdlib `urllib.request` (no `requests` dep) with `certifi`-backed TLS
+  - errors silent (logged only)
+- Compare `tag_name` against `__version__` using `packaging.version.Version`. If newer, show a non-modal banner with a "Open download page" button.
+- Privacy paragraph added to README documenting the only network call
 
 **Acceptance:** Fresh install → empty library prompt works; tab cycles through all controls; screen reader (Orca on Linux) announces transport buttons; update banner appears when a fake newer tag is mocked in tests.
 
-#### Phase 10 — Distribution, CI, release v0.1.0 (1–2 days)
+#### Phase 10 — Distribution, CI, release v0.1.0 (1.5 days)
 
-- `packaging/linux/AppImageBuilder.yml` (or a `linuxdeploy` invocation script). Build target: Ubuntu 22.04 runner (glibc 2.35 floor). libmpv is **distro-installed**, not bundled — recipe declares `libmpv2` as a runtime dep and the AppImage `.desktop` includes it in `MimeType` comments.
+- `packaging/linux/AppImageBuilder.yml` (or a `linuxdeploy` invocation script). Build on Ubuntu 22.04 runner specifically (glibc 2.35 — never `ubuntu-latest` which is too new for downstream compatibility). libmpv is **distro-installed**, not bundled — recipe declares `libmpv2` as a runtime dep
 - `packaging/linux/PKGBUILD` for AUR; depends on `mpv`, `python>=3.12`, `python-pyside6`, etc.
-- `packaging/windows/skald.iss` — Inno Setup script: registers `.m4b` association under `HKCU`, Start Menu shortcut, uninstall entry, embeds the PyInstaller `--onedir` output. Includes `mpv-2.dll` next to `skald.exe`.
-- `pyinstaller.spec` (or CLI args in CI): `--onedir`, `--windowed`, `--add-binary "mpv-2.dll;."` on Windows
+- `packaging/windows/skald.iss` — Inno Setup: registers `.m4b` association under `HKCU`, Start Menu shortcut, uninstall entry, embeds the PyInstaller `--onedir` output
+- `pyinstaller.spec` (or CLI args in CI): `--onedir`, `--windowed`, `--add-binary "libmpv-2.dll;."` on Windows
+- **`libmpv-2.dll` is fetched at CI build time**, not vendored in-repo, so each `skald` release auto-picks up upstream libmpv security fixes:
+  ```yaml
+  - name: Fetch libmpv
+    run: |
+      Invoke-WebRequest -Uri "https://sourceforge.net/projects/mpv-player-windows/files/libmpv/mpv-dev-x86_64-LATEST.7z" -OutFile mpv.7z
+      7z x mpv.7z -ompv
+      Copy-Item mpv\libmpv-2.dll .\dist\skald\
+  ```
+  SHA256 of the bundled DLL is recorded in `CHANGELOG.md` per release.
 - `.github/workflows/test.yml`:
   ```yaml
   on: [push, pull_request]
@@ -383,11 +492,9 @@ CREATE INDEX idx_tracks_book       ON tracks(book_id, order_index);
         - uses: actions/checkout@v4
         - uses: actions/setup-python@v5
           with: { python-version: ${{ matrix.python }}, cache: pip }
-        - run: pip install -e .[dev,linux] # or [dev,windows]
-        - run: |
-            sudo apt-get install -y libmpv2 libmpv-dev   # linux
-            # windows: vendored libmpv-2.dll on PATH
+        - run: pip install -e .[dev,linux]   # or [dev,windows] on Windows
         - run: pre-commit run --all-files
+        - run: lint-imports
         - run: mypy src/
         - run: pytest -v
   ```
@@ -400,14 +507,14 @@ CREATE INDEX idx_tracks_book       ON tracks(book_id, order_index);
     build-linux:
       runs-on: ubuntu-22.04
       steps:
-        - # checkout, setup-python, install libmpv, pip install -e .[linux]
+        - # checkout, setup-python, apt install libmpv2 libmpv-dev, pip install -e .[linux]
         - # pyinstaller --onedir
         - # linuxdeploy + appimagetool → skald-X.Y.Z-x86_64.AppImage
         - uses: actions/upload-artifact@v4
     build-windows:
       runs-on: windows-latest
       steps:
-        - # checkout, setup-python, vendor mpv-2.dll
+        - # checkout, setup-python, fetch libmpv-2.dll, pip install -e .[windows]
         - # pyinstaller --onedir
         - uses: Minionguyjpro/Inno-Setup-Action@v1
           with: { path: packaging/windows/skald.iss }
@@ -419,18 +526,31 @@ CREATE INDEX idx_tracks_book       ON tracks(book_id, order_index);
       steps:
         - uses: actions/download-artifact@v4
           with: { path: artifacts }
+        - name: Generate SHA256SUMS
+          run: |
+            cd artifacts
+            sha256sum *.AppImage *.exe > SHA256SUMS.txt
         - uses: softprops/action-gh-release@v2
           with:
-            files: artifacts/**/*
+            files: |
+              artifacts/**/*.AppImage
+              artifacts/**/*.exe
+              artifacts/SHA256SUMS.txt
             generate_release_notes: true
             prerelease: ${{ contains(github.ref_name, '-') }}
   ```
-- `MANUAL_TEST_PLAN.md` — checklist of things automation can't reliably cover: GUI look-and-feel on both themes, media keys on a real KDE / Windows install, sleep timer ticking down, missing-file badge, single-instance focus
-- README update: install instructions per OS (with SmartScreen warning note), screenshots once GUI exists, keyboard shortcuts table
-- App icon: ship a placeholder SVG (simple harp/lyre silhouette in terracotta) — flagged in `tbds.md` for a better design later
-- Tag `v0.1.0` on gitforge — verify the patched mirror pushes the tag to GitHub (already confirmed end-to-end during repo setup) and the release workflow produces both artifacts on the GitHub Release
+- `MANUAL_TEST_PLAN.md` — checklist of things automation can't cover: GUI look-and-feel on both themes, media keys on real KDE / Windows installs, sleep timer ticking down, missing-file badge, single-instance focus, file-association handoff
+- README update:
+  - Install instructions per OS (download AppImage / Windows installer; **never `pip install skald`** — the PyPI namespace is occupied by an unrelated package; document as a `tbds.md` follow-up)
+  - SHA256 verification commands per OS (`sha256sum -c SHA256SUMS.txt` / `Get-FileHash`)
+  - SmartScreen first-run note for Windows
+  - Screenshots once GUI exists
+  - Keyboard shortcuts table
+  - Privacy paragraph about the update check
+- App icon: ship a placeholder SVG (stylized harp/lyre in terracotta) — `tbds.md` notes future improvement
+- Tag `v0.1.0` on gitforge — mirror push (already verified end-to-end) propagates to GitHub and triggers the release workflow
 
-**Acceptance:** `v0.1.0` GitHub Release page has both a working `skald-0.1.0-x86_64.AppImage` and `skald-setup-0.1.0.exe`. Both launch and play an audiobook on a clean VM.
+**Acceptance:** `v0.1.0` GitHub Release page has working `skald-0.1.0-x86_64.AppImage`, `skald-setup-0.1.0.exe`, and `SHA256SUMS.txt`. Both binaries launch and play an audiobook on a clean VM.
 
 ### Estimated effort
 
@@ -453,15 +573,15 @@ For a part-time project this realistically maps to 2–3 calendar months.
 
 ## Alternative Approaches Considered
 
-The brainstorm already rejected a number of alternatives. Recording them here so the plan stays anchored:
+The brainstorm already rejected:
 
-- **Rust + Tauri or egui** instead of Python + PySide6 — rejected because user is most familiar with Python and PySide6 (Q3). Tradeoff accepted: ~80–150 MB bundle vs. ~5–20 MB for Rust.
-- **`python-vlc` instead of `python-mpv`** — rejected for clunkier API and worse chapter handling (Q4).
-- **JSON files instead of SQLite** — rejected; gets ugly at scale and loses queryability (Q9).
-- **Online metadata lookup in v1** — rejected; keeps app offline-clean (Q8), deferred to future-features.
-- **macOS support** — out of scope for v1 (Q17); separate effort with macOS-specific QSS + Gatekeeper signing.
-- **Flatpak distribution** — deferred (Q17); the watched-folder feature needs careful sandbox permission handling.
-- **AAX/AAXC (Audible DRM)** — deferred (Q2); legal grey area + DRM complexity.
+- **Rust + Tauri or egui** (Q3) — user is most familiar with Python and PySide6. Tradeoff accepted: ~80–150 MB bundle vs. ~5–20 MB for Rust.
+- **`python-vlc`** (Q4) — clunkier API and worse chapter handling than mpv.
+- **JSON files instead of SQLite** (Q9) — gets ugly at scale and loses queryability.
+- **Online metadata lookup in v1** (Q8) — keeps app offline-clean; deferred.
+- **macOS support** (Q17) — out of scope for v1.
+- **Flatpak distribution** (Q17) — sandbox-permission work deferred.
+- **AAX/AAXC (Audible DRM)** (Q2) — legal grey area + DRM complexity.
 
 ## System-Wide Impact
 
@@ -472,78 +592,87 @@ Within this single-process app, the chain when a user double-clicks a book in th
 ```
 LibraryView.item_double_clicked (Qt signal)
   → MainWindow.open_book(book_id)
-    → MainPlaybackController.load(book)        ← reads positions + chapters
-      → Player.load(path)                       ← libmpv loadfile
+    → MainPlaybackController.load(book)         ← reads positions + chapters via library.get_book
+      → Player.load(path)                       ← libmpv loadfile (path from DB, no validate_media_path needed)
         → property observers wire up
-        → 'time-pos' fires every ~1s on mpv thread
-          → forwarded via QObject.Signal to main thread
-            → MainPlaybackController.state_changed signal
+        → 'time-pos' fires every ~1s on mpv event thread
+          → Player.add_listener callbacks fire
+            → PlayerSignals (the GUI boundary QObject) emits state_changed
               ↓                ↓                       ↓
-            PlayerBar      BookDetail              integration adapters
-            (UI update)    (UI update)             (MPRIS / SMTC)
-      → every 5s + on pause/seek/chapter:
-        → Positions.write(book_id, time-pos)
-          → SQLite UPDATE (WAL)
+            PlayerBar       BookDetail              integration adapters
+            (UI update)     (UI update)             (MPRIS / SMTC, throttled to 5s)
+      → every 5s while playing + on pause/seek/chapter:
+        → positions.write(book_id, position_ms)
+          → SQLite UPDATE (WAL, parameterized)
 ```
 
 ### Error propagation
 
 | Failure point | Behavior | User-visible |
 |---|---|---|
-| libmpv can't open file | `Player.load` raises `PlayerError` | Toast: "Couldn't open: <filename>"; book marked status='missing' on rescan |
-| SQLite locked (rare; single-instance gate prevents most) | `busy_timeout=5000` retries; if still locked, logged + skipped (position write is idempotent) | Silent in normal use; log shows |
+| libmpv can't open file | `Player.load` raises `PlayerError` | Toast: "Couldn't open: <filename>"; book marked `status='missing'` on rescan |
+| SQLite locked (rare; single-instance gate + file lock prevent most) | `busy_timeout=5000` retries; if still locked, logged + skipped | Silent in normal use; log shows |
 | mutagen can't parse | extraction falls back through chain (mpv chapter_list → folder inference → empty) | Book may have weak metadata until user edits |
 | MPRIS/SMTC registration fails on startup | logged WARNING; rest of app continues | No media keys; everything else works |
 | Update-check HTTP failure | logged DEBUG; no banner shown | Silent |
 | Cover decode fails | fall back to a generic terracotta book-icon | Generic cover shown |
+| Future-version DB | `MigrationError` raised before UI starts | Clear error message: "Library DB written by newer skald (v2). Upgrade or restore from backup." |
+| Symlink loop in watched folder | scanner detects via `(st_dev, st_ino)` set; skips and logs | Logged; scan completes |
+| Crafted image in cover upload | `QImageReader` allocation limit triggers; decode returns null | Dialog shows "Cannot decode image" |
 
 Errors **never silently swallow** in the playback path. The mpv `end-file` event with `reason='error'` raises into the controller and surfaces as a toast.
 
 ### State lifecycle risks
 
-- **Partial position write on crash**: a single `UPDATE positions SET seconds=?` is atomic in SQLite. WAL commit is durable on `PRAGMA synchronous=NORMAL` (the documented "no corruption, but may lose the last N seconds on power loss" tradeoff — acceptable).
-- **Stale `covers/<book_id>.jpg`** after a book is deleted: cascade FK deletes the row, but the file lingers. Cleanup: `core/covers.py` has a `gc_orphans()` called from `scan` at the end.
-- **Watched folder pointing at unmounted drive**: scanner detects `not folder.exists()`, logs WARNING, leaves all of that folder's books at `status='missing'`. Next scan when the drive is back restores them.
-- **libmpv crash during playback**: process exits; user re-launches. Position is durable because we write every 5s + on chapter change.
+- **Partial position write on crash**: single `UPDATE positions` is atomic in SQLite. WAL commit on `synchronous=NORMAL` is durable (no corruption; may lose the last commit on power loss — acceptable).
+- **Stale `covers/<book_uuid>.jpg`** after a book is archived/removed: cascade FK deletes the row, but the file lingers. Cleanup: `library.gc_orphans()` called from scan completion.
+- **Watched folder pointing at unmounted drive**: scanner detects `not folder.exists()`, logs WARNING, leaves that folder's books at `status='missing'`. Next scan when the drive is back restores them.
+- **libmpv crash during playback**: process exits; user re-launches. Position is durable because positions write every 5s while playing + on chapter change.
+- **Folder rename**: scanner's identity chain (sidecar UUID → fingerprint → path) re-attaches the moved folder to the existing book row; position/bookmarks/metadata follow.
+- **External re-tag**: scanner's `file_mtime` check detects the change and re-extracts metadata; user overrides (`metadata_overrides` table) are preserved via the `COALESCE` read path.
 
-### API surface parity
+### Integration test scenarios
 
-- **GUI vs CLI vs TUI**: the three modes share `MainPlaybackController` and `Library`. Anything you can do via the GUI's player bar (pause, seek, speed, chapter nav) can be done via TUI keystrokes — feature parity is enforced by the fact that they both call into the same controller.
-- **What's GUI-only**: bookmark add/edit/delete UI, metadata editing dialog, cover upload, library grid/list/filter/sort UI. These exist in v1 only in the GUI. (Future features file already notes the CLI-controls-GUI gap.)
-
-### Integration test scenarios (manual + automated mix)
-
-1. **Folder-of-MP3s book with messy track tags** (some `track=`, some missing) — scanner natural-sorts, library shows correct order, chapter sidebar names match filenames.
-2. **M4B with embedded `chpl` chapters** — chapter detection via mutagen; click chapter in sidebar jumps to time; position resume lands within the right chapter.
-3. **Watched folder containing both a single-file book and a multi-file book** — both detected, displayed in the same library.
-4. **Network drive unplugged mid-listen** — `end-file` with `reason='error'` raises a toast; book marked missing on next rescan; the rest of the library is unaffected.
-5. **GUI running, user opens a `.m4b` via Windows Explorer double-click** — file association sends the path to the running GUI via `QLocalSocket`; GUI focuses and opens the book detail view.
-6. **Theme change while playing** — full QSS reload mid-playback; player keeps playing; no visual flicker.
-7. **Second `skald play` launched while GUI running** — refused with clear error message, exit code 1.
+1. **Folder-of-MP3s book with messy track tags** (some `track=`, some missing) — scanner natural-sorts, library shows correct order, chapter sidebar names match filenames
+2. **M4B with embedded `chpl` chapters** — chapter detection via mutagen; click chapter in sidebar jumps to time; position resume lands within the right chapter
+3. **Watched folder containing both a single-file book and a multi-file book** — both detected
+4. **Watched folder with a symlink loop** — scanner doesn't hang; logs the dedup
+5. **Network drive unplugged mid-listen** — `end-file` with `reason='error'` raises a toast; book marked missing on next rescan; the rest of the library is unaffected
+6. **GUI running, user opens a `.m4b` via Windows Explorer double-click** — file association sends the path to the running GUI via `QLocalSocket`; receiver routes through `validate_media_path`; GUI focuses and opens the book detail view
+7. **Theme change while playing** — full QSS reload mid-playback; player keeps playing; no visual flicker
+8. **Second `skald play` launched while GUI running** — `QLocalSocket` probe detects GUI; CLI refuses with clear error message, exit code 1
+9. **Folder renamed between scans** — book row preserved; position/bookmarks intact
+10. **Mutagen returns empty chapter list for an M4B with chapter-text-track format** — falls back to mpv `chapter_list` and works correctly
 
 ## Acceptance Criteria
 
-### Functional requirements (v1 ships when all of these are true)
+### Functional requirements (v1 ships when all are true)
 
 - [ ] Playback works for MP3, M4B, M4A, OGG, FLAC on both Linux and Windows
 - [ ] Folder-as-book and single-file-as-book both detected
 - [ ] Variable speed 0.5×–3× with pitch preservation
-- [ ] Skip forward 30s / back 10s (the brainstorm Q6 default; configurable in `config.toml`). Research notes the broader industry trend of symmetric 30s/30s as an alternative; left as a future config preset list (5/10/15/30/45/60/90) but not the default.
+- [ ] Skip forward 30s / back 10s (brainstorm Q6 default; configurable in `config.toml`)
 - [ ] Sleep timer (15/30/45/60 min, end-of-chapter, custom)
 - [ ] User bookmarks with notes (add/edit/delete)
 - [ ] Per-book position memory; auto-resume on opening a book (not on launch)
 - [ ] Library scan of one or more watched folders
-- [ ] Manual cover-art upload (drag-drop + file picker)
+- [ ] Manual cover-art upload (drag-drop + file picker) with image-bomb hardening
 - [ ] Metadata editing dialog with override persistence
 - [ ] Dark + Light + Follow-system themes; runtime switch; terracotta accent
 - [ ] GUI library: grid + list views, sort, filter (in-progress / finished / not-started)
 - [ ] GUI: collapsible left pane, persistent bottom player bar
-- [ ] CLI: `skald play`, `skald scan`, `skald list` work
+- [ ] CLI: `skald play`, `skald scan`, `skald library` work
 - [ ] Media keys: MPRIS on Linux, SMTC on Windows
 - [ ] File association for `.m4b` registered (Linux `.desktop`, Windows Inno Setup)
 - [ ] Single-instance GUI; CLI refuses to play when GUI is up
 - [ ] Update-check banner (HTTPS GET to GH Releases) with opt-out
 - [ ] Missing-file books surface with a badge and survive rescans
+- [ ] Folder rename does not orphan position/bookmarks/metadata (identity via `book_uuid`)
+- [ ] Re-tagging an audio file in an external editor triggers metadata re-extraction on next scan
+- [ ] Scanner does not hang on symlink loops or recurse beyond depth 8
+- [ ] CLI rejects audio paths outside the allowed extension set
+- [ ] Cover upload re-encodes through `QImageReader` and never stores raw user bytes
+- [ ] DB written by a newer skald is rejected with a clear error message
 
 ### Non-functional requirements
 
@@ -551,91 +680,102 @@ Errors **never silently swallow** in the playback path. The mpv `end-file` event
 - [ ] Full keyboard navigation; tab order is logical; no mouse-only actions
 - [ ] HiDPI scaling works correctly (test 1.25× and 1.5×)
 - [ ] Screen-reader compatibility via Qt's default accessibility + `setAccessibleName` on custom widgets
-- [ ] Qt i18n scaffolding present; English-only ship; `.ts` extraction reproducible
+- [ ] Qt i18n scaffolding present; English-only ship; `.ts` extraction reproducible in CI
 - [ ] Startup time on a 100-book library < 2 seconds on a SATA SSD
-- [ ] Position write < 5ms in WAL mode (informally measured; not a CI gate)
 - [ ] No remote crash reporting; no analytics; only network call is the optional update check
+- [ ] Scanner runs on a background thread; UI stays responsive during a 500-book scan
+- [ ] Grid view scrolls smoothly at 500 books on a 1080p display (no per-frame JPEG decode)
+- [ ] Position-write timer is inactive while playback is paused
+- [ ] MPRIS/SMTC position updates emitted no more than once per 5 seconds
+- [ ] No `pip install skald` instructions in any documentation
+- [ ] Release artifacts have `SHA256SUMS.txt` attached to the GitHub Release
 
 ### Quality gates
 
-- [ ] `ruff check .` passes
+- [ ] `ruff check .` passes (including `S608` for SQL strings)
 - [ ] `mypy src/skald` passes with no errors
+- [ ] `lint-imports` passes (import-linter boundary contracts)
 - [ ] `pytest -v` passes on both Linux and Windows CI runners
-- [ ] `pre-commit run --all-files` passes (gate on commit)
+- [ ] `pre-commit run --all-files` passes
 - [ ] CI test workflow green on `main` after every push
-- [ ] CI release workflow on a test tag produces both AppImage and `.exe` artifacts
+- [ ] CI release workflow on a test tag produces both AppImage and `.exe` artifacts + `SHA256SUMS.txt`
+- [ ] `tests/conftest.py` generates audio fixtures via `ffmpeg`; no binary fixtures committed
+- [ ] Migration test covers: fresh-install, v1→vN with seeded data, simulated mid-migration crash, future-DB refusal, checksum mismatch detection
 - [ ] `MANUAL_TEST_PLAN.md` checklist run by Ludo before tagging `v0.1.0`
 
 ## Success Metrics
 
-This is a personal project, so the metrics are mostly qualitative:
+This is a personal project, so the metrics are qualitative:
 
 - **Primary:** Ludo uses `skald` as their daily-driver audiobook player for one full audiobook on Linux and one on Windows, without falling back to another player.
 - **Secondary:** Total v1 install size — AppImage under 50 MB (excluding distro-installed libmpv), Windows installer under 100 MB.
 - **Secondary:** No data-loss bugs in the first month of personal use (position memory, bookmarks, library state).
-- **Tertiary:** A second user (friend, Discord, anyone) successfully installs and uses it on their machine without one-on-one support — proves the install instructions are real.
+- **Tertiary:** A second user successfully installs and uses it on their machine without one-on-one support.
 
 ## Dependencies & Prerequisites
 
-### External dependencies (runtime)
-
-- **libmpv 2.x** — Linux: `mpv` / `libmpv2` distro package; Windows: bundled `mpv-2.dll`
+### Runtime
+- **libmpv 2.x** — Linux: distro package; Windows: `libmpv-2.dll` fetched at CI build time and bundled
 - **Python 3.12+** — bundled by PyInstaller on Windows; AUR depends on system Python
 - **Qt 6.7+** — bundled with PySide6 wheels on both OSes
 - **D-Bus session bus** (Linux only, for MPRIS) — present by default on GNOME / KDE / XFCE
 
-### External dependencies (build/CI)
-
+### Build/CI
 - GitHub Actions `ubuntu-22.04` and `windows-latest` runners
-- Inno Setup 6 (pre-installed on `windows-latest` per actions/runner-images #12947)
+- Inno Setup 6 (pre-installed on `windows-latest`)
 - `linuxdeploy` + `linuxdeploy-plugin-python` on Ubuntu 22.04
 - `softprops/action-gh-release@v2`, `Minionguyjpro/Inno-Setup-Action@v1`
 
-### Prerequisite: gitforge → GitHub mirror pushes tags
-
-**Already verified** during repo setup. Hook patched in `/hoard/workspace/gitforge-manager/app.py`. Verified end-to-end with `v0.0.0-mirror-test`. Captured in [`tbds.md`](../brainstorm/tbds.md).
+### Already-completed prerequisite
+- gitforge → GitHub mirror pushes tags. Verified end-to-end during repo setup. Captured in [`tbds.md`](../brainstorm/tbds.md).
 
 ## Risk Analysis & Mitigation
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| **Windows SMTC HWND interop is the worst code in the project** | High | Medium | Reference [DubyaDude/WindowsMediaController](https://github.com/DubyaDude/WindowsMediaController) for working Python interop. Worst case: ship without SMTC in v1, mark as a known limitation in README. MPRIS on Linux is dramatically simpler with `mpris_server`. |
-| **libmpv ABI break in a future distro** | Medium | Low | Pin `python-mpv` to `<2.0`; libmpv 2.x ABI has been stable for years. Document the apt/pacman package names; the AUR PKGBUILD pins explicitly. |
-| **PySide6 6.7+ not on Windows users' systems** | Low | Low | Bundled via PyInstaller. End users never install Python or PySide6. |
-| **AppImage glibc compatibility** | Medium | Medium | Build on `ubuntu-22.04` specifically (glibc 2.35). Do not use `ubuntu-24.04` or `ubuntu-latest` for the AppImage runner. |
-| **PyInstaller mis-detection of PySide6 modules** | Low | Low | Built-in PySide6 hook covers everything we use. Use `--collect-data PySide6` if Qt translation `.qm` files don't bundle. |
-| **SQLite corruption from a kill-9 during write** | Very Low | High | WAL + `synchronous=NORMAL` is documented as no-corruption (only lose the last commit). User accepts this tradeoff implicitly. |
-| **Crash leaves a stale `QLocalServer` socket on Unix; user can't relaunch** | Low | High | `QLocalServer.removeServer(name)` always called before `listen()`. Documented in code. |
-| **Qt clobbers `LC_NUMERIC`; libmpv silently mis-parses on non-English locales** | High (if forgotten) | High | First-thing init in `app.py`. Pin as comment + a `tests/unit/test_locale_init.py` that fails if the locale isn't `C` after `app.py` import. |
-| **Update-check hits GitHub rate limits** | Low | Low | Unauthenticated `/releases/latest` is 60/hr per IP; one call per startup is fine. Errors silent. |
-| **First-time Windows user spooked by SmartScreen** | High | Low | Documented prominently in README install instructions. Future: code-signing in `future-features.md`. |
-| **macOS users ask for a build** | Medium | Low | Documented as out-of-scope in `future-features.md`. Polite "PRs welcome" framing in README. |
-| **Bundle inflation past comfort threshold** | Low | Low | `--onedir` keeps things inspectable. Periodic audit; trim unused PySide6 modules with `--exclude-module` if needed. |
+| Windows SMTC HWND interop is the worst code in the project | High | Medium | Reference [DubyaDude/WindowsMediaController](https://github.com/DubyaDude/WindowsMediaController). Worst case: ship without SMTC in v1; document as a known limitation. MPRIS on Linux is dramatically simpler with `mpris_server`. |
+| libmpv ABI break in a future distro | Medium | Low | Pin `python-mpv<2.0`; libmpv 2.x ABI has been stable for years. |
+| AppImage glibc compatibility | Medium | Medium | Build on `ubuntu-22.04` specifically. Do not use `ubuntu-24.04` or `ubuntu-latest`. |
+| Qt clobbers `LC_NUMERIC`; libmpv silently mis-parses on non-English locales | High (if forgotten) | High | First init in `__main__.py`. Pin as comment + `test_locale_init.py` asserts for all entry paths. |
+| Update-check hits GitHub rate limits | Low | Low | Unauthenticated `/releases/latest` is 60/hr per IP; one call per startup is fine. Errors silent. |
+| First-time Windows user spooked by SmartScreen | High | Low | Documented prominently in README. Future: code-signing in `future-features.md`. SHA256SUMS published on each release. |
+| Bundle inflation past comfort threshold | Low | Low | `--onedir` keeps things inspectable. Periodic audit; trim unused PySide6 modules with `--exclude-module` if needed. |
+| **Folder rename orphans user's position/bookmarks** | High | High | Stable `book_uuid` via `.skald.json` sidecar or content fingerprint. |
+| **Power loss mid-migration corrupts DB** | Low | High | Explicit `BEGIN`/`COMMIT` around each migration; online backup before; `_migrations` audit table. |
+| **User downgrades skald binary, opens newer-schema DB, code-path silently corrupts data** | Medium | High | Refuse to open DB with `user_version > EXPECTED_VERSION`. |
+| **`QLocalServer` socket spoofed by another local user on shared Linux** | Low | Medium | `UserAccessOption` + `user_runtime_dir` with 0700 perms. |
+| **Scanner hangs on symlink loop in watched folder** | Medium | Medium | `followlinks=False` + `(st_dev, st_ino)` dedup + depth cap. |
+| **Malicious image triggers Qt CVE via cover upload** | Low | Medium | Re-encode through `QImageReader` with allocation limit; clamp dimensions; strip metadata. |
+| **User runs `pip install skald` and gets unrelated PyPI package** | Medium | High | README never instructs `pip install`. |
+| **Bundled `mpv-2.dll` carries stale ffmpeg CVEs into v0.N** | Medium | Medium | Fetch DLL at CI build time; record SHA256 per release. |
+| **External re-tag (mp3tag) not detected on next scan** | High | Low | `tracks.file_mtime` triggers re-extraction. |
+| **Synchronous scan freezes UI on a 500-book library** | High | Medium | `QThread`-based scanner with incremental progress signals. |
 
 ## Resource Requirements
 
 - **One developer** (Ludo) — part-time over 2–3 months
-- **Test hardware**: one Linux desktop (Arch), one Windows machine (Windows 10 or 11). Both already available.
-- **GitHub Actions usage**: well within free-tier minutes for a personal repo (matrix tests run < 10 min each; releases < 30 min each)
-- **No paid services**: no Sentry, no analytics, no code-signing cert in v1 (all deferred)
+- **Test hardware**: one Linux desktop (Arch), one Windows machine. Both already available.
+- **GitHub Actions usage**: well within free-tier minutes (matrix tests < 10 min, releases < 30 min)
+- **No paid services**: no Sentry, no analytics, no code-signing cert in v1
 - **No additional infra**: gitforge.online already operating; GitHub repo already mirrored
 
 ## Future Considerations
 
-All deferred features documented in [`docs/brainstorm/future-features.md`](../brainstorm/future-features.md). Highlights:
+All deferred features in [`docs/brainstorm/future-features.md`](../brainstorm/future-features.md). Highlights:
 
-- **Online metadata lookup** (Open Library / Audible) behind a toggle — when v1 is solid
-- **CLI controls running GUI** via local socket — once a user actually asks for it
-- **Flatpak distribution** with sandbox permission handling
-- **Code signing** (Windows Authenticode, Apple Developer for any future macOS)
-- **macOS support** as a deliberate effort
-- **GUI for keyboard rebinding** (v1 is config.toml only)
-- **`skald play --isolated`** flag for running CLI alongside GUI with a separate DB
-- **Equalizer / mono mix** if a real user requests them
-- **Author / series filters** in the library view
-- **External `.cue` / `chapters.txt`** parsing
-- **AAX / AAXC** support (legal grey area)
-- **Remote crash reporting (Sentry)** if bug volume justifies it
+- Online metadata lookup (Open Library / Audible) behind a toggle
+- CLI controls running GUI via local socket
+- Flatpak distribution with sandbox permission handling
+- Code signing (Windows Authenticode, Apple Developer for future macOS)
+- macOS support as a deliberate effort
+- GUI for keyboard rebinding (v1 is config.toml only)
+- `skald play --isolated` flag for CLI alongside GUI with a separate DB
+- Equalizer / mono mix
+- Author / series filters in the library view
+- External `.cue` / `chapters.txt` parsing
+- AAX / AAXC support (legal grey area)
+- Remote crash reporting (Sentry) if bug volume justifies it
+- Claim the PyPI namespace for `skald` (currently held by an unrelated package)
 
 ## Documentation Plan
 
@@ -646,7 +786,7 @@ All deferred features documented in [`docs/brainstorm/future-features.md`](../br
 | `docs/plans/<this file>` | This document | Future-Ludo |
 | `MANUAL_TEST_PLAN.md` | Phase 10 | Ludo before each release |
 | Inline docstrings | Throughout (no AI-sounding comments per CLAUDE.md) | Code readers |
-| `CHANGELOG.md` | Phase 10; manual edits per release | End users; release notes |
+| `CHANGELOG.md` | Phase 10; manual edits per release; includes libmpv DLL SHA256 | End users; release notes |
 | Screenshots | Phase 10 after GUI is final | README |
 | App icon | Phase 10 placeholder; improve later | Branding |
 
@@ -654,27 +794,27 @@ All deferred features documented in [`docs/brainstorm/future-features.md`](../br
 
 ### Origin
 
-- **Origin document:** [`docs/brainstorm/decisions.md`](../brainstorm/decisions.md) — 27 questions answered covering scope, architecture, UX, distribution, licensing, accessibility, i18n, telemetry, versioning, and runtime behavior. Key decisions carried forward verbatim:
+- **Origin document:** [`docs/brainstorm/decisions.md`](../brainstorm/decisions.md) — 27 questions answered covering scope, architecture, UX, distribution, licensing, accessibility, i18n, telemetry, versioning, and runtime behavior. Key decisions carried forward:
   - **Q3 / Q4:** Python + PySide6 + python-mpv (audio engine)
   - **Q7 / Q9:** Multiple watched folders, read-only against user files, SQLite in platform-standard data dir, settings in separate `config.toml`
   - **Q11–Q14:** Two-pane layout with collapsible library pane, grid + list modes, custom QSS theme with `#C45A3A` terracotta accent on dark + light + follow-system
   - **Q17 / Q18:** AppImage + AUR + Inno Setup; update-check via GitHub Releases; no code signing in v1
   - **Q25:** Canonical source on gitforge.online; GitHub mirror is community surface; tag-mirror patch already applied and verified
   - **Q27:** No auto-resume on launch; position writes every 5s + events; missing-file books keep state; single-instance GUI; CLI refuses to run when GUI is up
+
 - **Companion docs:**
-  - [`docs/brainstorm/future-features.md`](../brainstorm/future-features.md) — 22 deferred items
+  - [`docs/brainstorm/future-features.md`](../brainstorm/future-features.md) — 22+ deferred items
   - [`docs/brainstorm/learned-topics.md`](../brainstorm/learned-topics.md) — patterns to apply to future brainstorms
-  - [`docs/brainstorm/tbds.md`](../brainstorm/tbds.md) — small loose ends (icon, gitforge-manager patch commit, contrast verification)
+  - [`docs/brainstorm/tbds.md`](../brainstorm/tbds.md) — small loose ends (icon, gitforge-manager patch commit, contrast verification, PyPI namespace claim)
 
 ### User context
 
-- **User's global instructions:** [`/home/ludo/.claude/CLAUDE.md`](file:///home/ludo/.claude/CLAUDE.md) — Python-first defaults, single-file-spike-then-scaffold workflow, pre-commit / ruff / mypy as the safety net for a non-programmer maintainer, no AI-sounding comments, verbose logging from day one
+- **User's global instructions:** `/home/ludo/.claude/CLAUDE.md` — Python-first defaults, single-file-spike-then-scaffold, pre-commit / ruff / mypy as safety net for a non-programmer maintainer, no AI-sounding comments, verbose logging from day one
 - **gitforge-manager API** at `http://localhost:7777` for canonical repo management
 
 ### External references (consulted 2026-05-22)
 
-- [python-mpv on PyPI](https://pypi.org/project/python-mpv/) — version 1.0.8
-- [jaseg/python-mpv on GitHub](https://github.com/jaseg/python-mpv) — API + locale fix + threading notes
+- [python-mpv on PyPI](https://pypi.org/project/python-mpv/) — version 1.0.8; API + locale fix + threading notes
 - [mpv manual — audio-pitch-correction](https://mpv.io/manual/master/) — `scaletempo2` auto-applied
 - [Qt for Python deployment guide (PyInstaller)](https://doc.qt.io/qtforpython-6/deployment/deployment-pyinstaller.html)
 - [QStyleHints / colorScheme](https://doc.qt.io/qtforpython-6/PySide6/QtGui/QStyleHints.html)
@@ -690,9 +830,9 @@ All deferred features documented in [`docs/brainstorm/future-features.md`](../br
 - [Minionguyjpro/Inno-Setup-Action](https://github.com/Minionguyjpro/Inno-Setup-Action)
 - [softprops/action-gh-release](https://github.com/softprops/action-gh-release)
 - [dbus-fast on PyPI](https://pypi.org/project/dbus-fast/) — active fork of dbus-next
-- [alexdelorenzo/mpris_server](https://github.com/alexdelorenzo/mpris_server) — MPRIS publisher abstraction
+- [alexdelorenzo/mpris_server](https://github.com/alexdelorenzo/mpris_server)
 - [MPRIS MediaPlayer2.Player spec](https://specifications.freedesktop.org/mpris/latest/Player_Interface.html)
-- [pywinrt/python-winsdk (deprecation notice)](https://github.com/pywinrt/python-winsdk) — `winsdk` deprecated, use per-namespace `winrt-*` packages
+- [pywinrt/python-winsdk (deprecation notice)](https://github.com/pywinrt/python-winsdk) — `winsdk` deprecated
 - [winrt-Windows.Media.Control on PyPI](https://pypi.org/project/winrt-Windows.Media.Control/)
 - [SystemMediaTransportControls (Microsoft Learn)](https://learn.microsoft.com/en-us/uwp/api/windows.media.systemmediatransportcontrols)
 - [DubyaDude/WindowsMediaController](https://github.com/DubyaDude/WindowsMediaController) — working SMTC interop reference in Python
@@ -703,782 +843,31 @@ All deferred features documented in [`docs/brainstorm/future-features.md`](../br
 - [SQLite WAL docs](https://sqlite.org/wal.html)
 - [Audiobookshelf book scanner docs](https://www.audiobookshelf.org/guides/book-scanner/) — folder-as-book heuristics, CD subfolder grouping, natural-sort fallback
 - [Voice (de.ph1b.audiobook) on F-Droid](https://f-droid.org/packages/de.ph1b.audiobook/) — reference for skip defaults, position cadence
-- [Qt-Advanced-Stylesheets](https://github.com/githubuser0xFFFF/Qt-Advanced-Stylesheets) — runtime QSS variables (option, not adopted for v1)
+- [pydantic-settings on PyPI](https://pypi.org/project/pydantic-settings/) — typed settings via BaseSettings
+- [import-linter docs](https://import-linter.readthedocs.io/) — boundary enforcement in CI
 - [Qt Dynamic Properties and Stylesheets wiki](https://wiki.qt.io/Dynamic_Properties_and_Stylesheets) — `unpolish`/`polish` after dynamic property change
 - [Fix PyQt/PySide styling on Linux pip install](https://www.pythonguis.com/faq/installation-via-pip-styling/) — `setStyle("Fusion")` baseline
 
 ### Related ecosystem
 
-- Audiobookshelf (web-based, server-required) — closest open-source comparable; the bar for "library detection that just works"
+- Audiobookshelf (web-based, server-required) — closest open-source comparable
 - Smart AudioBook Player (Android) — UX reference for chapter sidebar and bookmarks
 - Voice (Android, F-Droid) — clean minimalist UI reference
 
 ---
 
-# Deepening Appendix
+# Appendix — Optional scope rollbacks
 
-> **Deepened on:** 2026-05-22 via `/compound-engineering:deepen-plan`
-> **Reviewers consulted (in parallel):** code-simplicity, architecture-strategist, pattern-recognition-specialist, security-sentinel, performance-oracle, kieran-python-reviewer, data-integrity-guardian, data-migration-expert
-> **Status:** Findings folded into the plan as corrections (Section A), refinements (Sections B–E), and optional scope rollbacks (Section F). The original plan above is preserved unchanged.
-
-## Enhancement Summary
-
-### Key corrections (real defects in the original plan)
-
-1. **Locale fix relocates from `gui/app.py` to `skald/__main__.py`** — currently the CLI path bypasses it
-2. **Stable book identity via `book_uuid`** — folder renames currently orphan position/bookmarks/metadata
-3. **`sqlite3.executescript()` is NOT a transaction** — wrap migrations manually; this can corrupt the DB on power loss
-4. **Refuse to open a future-version DB** — protects user data from a downgrade run
-5. **Scanner must guard against symlink loops + path traversal** — real DoS / state-confusion bug
-6. **`validate_media_path()` for every externally-supplied path** — CLI args, file association, QLocalSocket handoff
-7. **Cover-upload dialog must re-encode through `QImageReader` with allocation limit** — bounds image-bomb risk
-8. **`QLocalServer` socket needs `UserAccessOption` + 0700 mode** — prevents same-machine spoof on shared Linux
-9. **Scanner runs on a `QThread` with incremental progress** — synchronous scan was the biggest UX hole
-10. **Pre-thumbnail covers to disk at 360px** — grid view at 500 books needs this or scroll stutters
-11. **Time fields stored as INTEGER milliseconds, not REAL seconds** — REAL invites float-equality bugs
-12. **`status` needs a `CHECK` constraint** — currently enforced by comment only
-13. **README must NEVER instruct `pip install skald`** — typosquatting risk; PyPI namespace is occupied
-14. **Position-write timer pauses while paused** — avoids HDD-spin/laptop-battery cost
-15. **MPRIS/SMTC position updates throttle to every 5s** — spec wants change-driven, not polled
-
-### New considerations discovered
-
-- The Qt `Signal` member in `core/playback_controller.py` couples non-GUI code to Qt — the contract needs to be transport-agnostic (callbacks or queues) so the asyncio MPRIS adapter and the synchronous CLI can both implement it.
-- SQLite connection lifetime is not specified in the plan — needs an explicit `threading.local()`-per-thread decision baked into `db/connection.py`.
-- The plan has both `config.toml` and SQLite for state, but **UI state** (splitter sizes, last-used view mode) belongs to neither — use `QSettings` or a separate `state.toml`.
-- Audio test fixtures shouldn't be committed binaries — generate at test setup with `ffmpeg` (a transitive of libmpv) in a session-scoped pytest fixture.
-- Each release should publish **SHA256 sums in the release notes** since v1 isn't code-signed.
-- `mpv-2.dll` should be **fetched at CI build time**, not vendored in the repo, so each `skald` release auto-picks up upstream libmpv security fixes.
-
----
-
-## Section A — Non-negotiable corrections (fold into the plan)
-
-Every item below is a real defect, not a stylistic preference. Apply each to the corresponding phase.
-
-### A1. Move locale fix to `skald/__main__.py` (`Non-negotiable rule 1`)
-
-The original "Non-negotiable cross-stack rules" rule 1 places `locale.setlocale(LC_NUMERIC, "C")` in `gui/app.py`. The CLI path (`skald play <path>`) and the TUI path import python-mpv but do not go through `gui/app.py` — they bypass the fix and fail silently on non-English locales.
-
-**Correction:** Move the locale fix to the top of `skald/__main__.py`, before any other import. Add a sanity assertion in `core/player.py`:
-```python
-import locale
-assert locale.getlocale(locale.LC_NUMERIC) == (None, None) or locale.getlocale(locale.LC_NUMERIC)[0] == "C", \
-    "LC_NUMERIC must be 'C' before instantiating mpv"
-```
-Update `tests/unit/test_locale_init.py` (Phase 1) to assert the fix is active after importing each of `skald.__main__`, `skald.gui.app`, and `skald.cli`.
-
-### A2. Stable book identity via `book_uuid`
-
-The original schema uses `books.path UNIQUE` as identity. A folder rename creates a new row and orphans the user's position, bookmarks, cover override, and metadata overrides under the old row. The brainstorm assumed read-only file access; rename is the realistic failure mode.
-
-**Correction:** Add `book_uuid TEXT NOT NULL UNIQUE` to the `books` table. On scan, identify a book by:
-1. A sidecar file `.skald.json` in the book folder (or alongside a single-file book) containing `{"uuid": "..."}`. Written on first scan, ignored if user deletes it.
-2. If no sidecar, a fingerprint = `sha256(first 64 KiB of first track + total_duration_s)` — stable across folder renames but unique enough.
-3. If both fail, fall back to path (legacy v1 behavior).
-
-`path` becomes mutable metadata, not identity. Document this in Phase 3.
-
-### A3. Migration atomicity — drop `executescript`
-
-`sqlite3.Connection.executescript()` issues an implicit `COMMIT` before running and does **not** wrap the script in a transaction. A multi-statement DDL halfway through a power loss leaves a half-applied schema with `user_version` un-advanced.
-
-**Correction:** Apply each migration manually within an explicit transaction:
-```python
-def apply_migration(conn: sqlite3.Connection, version: int, sql_text: str) -> None:
-    conn.execute("BEGIN")
-    try:
-        for stmt in split_sql_statements(sql_text):
-            conn.execute(stmt)
-        conn.execute(f"PRAGMA user_version = {version}")
-        conn.execute("COMMIT")
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
-```
-SQLite supports transactional DDL — the version bump and the schema change commit atomically.
-
-### A4. Refuse newer-than-expected DB
-
-If the user runs `v0.1.0` after `v0.2.0` migrated their DB to `user_version = 2`, SQLite happily opens it and `v0.1.0` code sees unknown columns and may corrupt data.
-
-**Correction:** At startup, after opening the DB and reading `PRAGMA user_version`:
-```python
-EXPECTED_VERSION = 1
-current = conn.execute("PRAGMA user_version").fetchone()[0]
-if current > EXPECTED_VERSION:
-    raise SkaldError(
-        f"Library DB was written by a newer skald (schema v{current}). "
-        f"This binary supports v{EXPECTED_VERSION}. Upgrade or restore from backup."
-    )
-```
-Document "downgrades not supported" in the README.
-
-### A5. SQLite online-backup before any migration
-
-The plan has no backup story. The library DB is irreplaceable personal state.
-
-**Correction:** Before applying any migration where `current_version < EXPECTED_VERSION`:
-```python
-backup_path = data_dir / f"library.db.bak-v{current_version}-{int(time.time())}"
-with sqlite3.connect(backup_path) as dst:
-    conn.backup(dst)
-```
-Keep the last 3 backups; rotate older ones. Use `Connection.backup()` (the online backup API), not file copy — file copy + WAL races.
-
-### A6. `_migrations` audit table alongside `PRAGMA user_version`
-
-`PRAGMA user_version` is a single 32-bit integer. An audit table gives ordering, names, timestamps, and checksums for debuggability.
-
-**Correction:** Add to the schema:
-```sql
-CREATE TABLE _migrations (
-    version    INTEGER PRIMARY KEY,
-    name       TEXT    NOT NULL,
-    checksum   TEXT    NOT NULL,
-    applied_at INTEGER NOT NULL
-);
-```
-Keep `PRAGMA user_version` as the fast-path read for "what version are we at"; the audit table is the durable record.
-
-### A7. File lock covering the pre-Qt migration window
-
-The Qt single-instance gate fires *after* `QApplication` starts, but migrations run before the UI is up. A simultaneous `skald scan` from a terminal would race the migrating GUI.
-
-**Correction:** Acquire an exclusive **file lock on `library.db.lock`** (use `fcntl.flock` on Unix, `msvcrt.locking` on Windows, abstracted in `db/connection.py`) as the very first thing in `db/connection.py`, before any SQL. Migrations hold the lock exclusively; normal CLI/GUI ops take it shared. This is independent of the Qt single-instance gate and covers the migration window.
-
-### A8. Scanner symlink and path-traversal guards
-
-The original Phase 3 doesn't address symlink loops or path traversal.
-
-**Correction:** In `core/scanner.py`:
-- Use `os.walk(folder, followlinks=False)` (the default — explicitly document it)
-- Deduplicate visited directories via `(st_dev, st_ino)` set
-- For every candidate book path, call `Path.resolve(strict=True)` and assert `resolved.is_relative_to(watched_root.resolve())` — refuses paths that escape the watched root via crafted symlinks
-- Cap recursion depth to 8 levels
-- Cap files per book to 500 (audiobooks rarely exceed ~200 tracks)
-- Add `tests/fixtures/symlink_loop/` (generated by conftest, not committed) and a unit test asserting the scanner doesn't hang
-
-### A9. `validate_media_path()` for all externally-supplied paths
-
-A shared helper called from every path that takes user/OS input.
-
-**Correction:** Add to `core/paths.py` (or `core/validation.py`):
-```python
-ALLOWED_AUDIO_EXTS = frozenset({".mp3", ".m4a", ".m4b", ".ogg", ".opus", ".flac", ".wav"})
-
-def validate_media_path(p: Path | str) -> Path:
-    resolved = Path(p).resolve(strict=True)
-    if resolved.suffix.lower() not in ALLOWED_AUDIO_EXTS:
-        raise SkaldError(f"Unsupported file type: {resolved.suffix}")
-    if not resolved.is_file():
-        raise SkaldError(f"Not a regular file: {resolved}")
-    return resolved
-```
-Call it from `cli/play.py` argument handling, from the `QLocalSocket` second-launch handler (which receives forwarded `sys.argv`), and from file-association entry. Plain library-browsing playback in the GUI bypasses it (the path comes from the DB, which we wrote).
-
-### A10. Cover-upload re-encode through `QImageReader`
-
-Storing user-supplied image bytes verbatim leaves the door open to crafted JPEG/PNG triggering Qt CVEs and bypasses any sanitization.
-
-**Correction:** In `gui/dialogs/cover_upload.py` (or merged dialogs file):
-```python
-reader = QImageReader(source_path)
-reader.setAllocationLimit(64)  # MB; default is 128, tighter is fine
-img = reader.read()
-if img.isNull():
-    raise SkaldError(f"Cannot decode image: {reader.errorString()}")
-# Clamp dimensions
-if img.width() > 4096 or img.height() > 4096:
-    img = img.scaled(4096, 4096, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-# Re-encode to JPEG quality 85, strip EXIF/ICC
-img.save(target_path, "JPEG", 85)
-```
-Accept JPEG and PNG only. File size cap of 10 MB before decode.
-
-### A11. `QLocalServer` socket permissions on Linux
-
-Default `QLocalServer.listen(name)` on Linux creates a world-accessible socket. Another local user on the same machine can `removeServer()` then `listen()` first and silently intercept forwarded `sys.argv` (which leak filesystem paths).
-
-**Correction:** In `core/single_instance.py`:
-```python
-server = QLocalServer()
-server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
-# Place socket in user_runtime_dir, mode 0700
-socket_path = platformdirs.user_runtime_dir("skald")
-Path(socket_path).mkdir(parents=True, exist_ok=True, mode=0o700)
-server.listen(f"{socket_path}/skald-singleton")
-```
-On Windows, named pipes are session-scoped — no extra hardening needed.
-
-### A12. Single-instance check via `QLocalSocket` probe, not lockfile
-
-The original plan ambiguously describes the CLI's "GUI running?" gate as "lockfile or socket-probe." Lockfile and socket-probe have different race characteristics; lockfiles from crashed processes are exactly the bug already addressed for `QLocalServer`.
-
-**Correction:** In `core/single_instance.py`, expose `gui_is_running() -> bool` via:
-```python
-socket = QLocalSocket()
-socket.connectToServer(SINGLE_INSTANCE_NAME)
-return socket.waitForConnected(timeout_ms=500)
-```
-Both GUI startup and CLI `play` use this primitive. Atomic and self-healing across crashes (a stale GUI process can't accept a connection).
-
-### A13. Time fields as INTEGER milliseconds
-
-REAL fields invite float-equality bugs in queries and lose exact precision over very long books.
-
-**Correction:** Change schema:
-```sql
--- Before:
-positions.seconds   REAL NOT NULL,
-bookmarks.seconds   REAL NOT NULL,
-books.duration_s    REAL,
-tracks.duration_s   REAL,
-
--- After:
-positions.position_ms   INTEGER NOT NULL,
-bookmarks.position_ms   INTEGER NOT NULL,
-books.duration_ms       INTEGER,
-tracks.duration_ms      INTEGER,
-```
-Convert at the boundary with libmpv (`time-pos * 1000` rounded). Helpers `ms_to_human(ms) -> "1:23:45"` in `core/time_util.py`.
-
-### A14. `CHECK` constraint on `status`
-
-The original comment says "'present' | 'missing'" but the schema doesn't enforce it.
-
-**Correction:**
-```sql
-status TEXT NOT NULL DEFAULT 'present'
-       CHECK (status IN ('present', 'missing', 'archived')),
-```
-Add `'archived'` now (soft-delete for the future "remove from library" feature). Plan Phase 1.
-
-### A15. `tracks.file_mtime` to detect external re-tags
-
-A user fixes a misspelled author in mp3tag. Next scan sees the path is unchanged and doesn't re-extract; the old metadata sticks forever.
-
-**Correction:** Add `tracks.file_mtime INTEGER` (Unix seconds). Scanner re-extracts when `stat(path).st_mtime` differs.
-
-### A16. `idx_bookmarks_book` index; drop `idx_books_status`
-
-The original plan misses a hot-path index and includes a low-cardinality one.
-
-**Correction:**
-```sql
-CREATE INDEX idx_bookmarks_book ON bookmarks(book_id, position_ms);
--- Drop idx_books_status — two-value column doesn't benefit from a btree.
-```
-
-### A17. README must NEVER instruct `pip install skald`
-
-`pypi.org/project/skald/` is an unrelated package. Following a `pip install skald` instruction lands the user on someone else's code with arbitrary install-hook capability.
-
-**Correction:** README install section reads (Linux): "Download the AppImage from the GitHub Releases page, `chmod +x`, run." (Windows): "Download `skald-setup-X.Y.Z.exe` from Releases, run." Never mention PyPI. Document `tbds.md` entry for the future "claim PyPI namespace" task.
-
-### A18. SHA256 sums on every release
-
-No code signing in v1; SHA256 sums are the only authentication users get beyond HTTPS to github.com.
-
-**Correction:** Add to `.github/workflows/release.yml` after artifact builds:
-```yaml
-- name: Generate SHA256 sums
-  run: |
-    cd artifacts
-    sha256sum *.AppImage *.exe > SHA256SUMS.txt
-- uses: softprops/action-gh-release@v2
-  with:
-    files: |
-      artifacts/*.AppImage
-      artifacts/*.exe
-      artifacts/SHA256SUMS.txt
-```
-README install instructions include a one-line `sha256sum -c SHA256SUMS.txt` / `Get-FileHash` verify command.
-
-### A19. Fetch `mpv-2.dll` at CI build time
-
-Vendoring the DLL in-repo means each `skald` release ships whichever libmpv was current when the repo was last touched. Fetching at build time auto-tracks upstream security fixes.
-
-**Correction:** In `.github/workflows/release.yml` (Windows job):
-```yaml
-- name: Fetch libmpv
-  run: |
-    Invoke-WebRequest -Uri "https://sourceforge.net/projects/mpv-player-windows/files/libmpv/mpv-dev-x86_64-LATEST.7z" -OutFile mpv.7z
-    7z x mpv.7z -ompv
-    Copy-Item mpv\libmpv-2.dll .\dist\skald\
-```
-Record the SHA256 of the bundled DLL in `CHANGELOG.md` per release.
-
-### A20. Mandate `?` parameter binding for all SQL
-
-Not currently in code, but the rule needs to be locked in before any SQL is written.
-
-**Correction:** Add to "Non-negotiable cross-stack rules" as **Rule 9**: "All SQL uses `?` parameter binding. No f-strings, `.format()`, or `+` concatenation in any query." Enable `ruff` rule `S608` (`hardcoded-sql-expression`) in `pyproject.toml`. Add a CI check that grep-fails on `f"…SELECT|INSERT|UPDATE|DELETE…"` patterns under `src/`.
-
----
-
-## Section B — Architecture and pattern refinements
-
-These improve maintainability and reduce future pain without altering scope.
-
-### B1. Flatten the `core/` namespace
-
-Multiple reviewers flagged `src/skald/core/` as a Java-ism. Python convention puts modules at the package root.
-
-**Refinement (option 1, minimum effort):** Delete the `core/` directory level. `src/skald/player.py`, `src/skald/scanner.py`, etc. Shorter imports, no information lost.
-
-**Refinement (option 2, cleaner):** Split the 14 `core/` modules into three intent-named subpackages:
-- `skald/playback/` — `player.py`, `controller.py`, `chapters.py`
-- `skald/library/` — `library.py`, `scanner.py`, `metadata.py`, `positions.py`, `bookmarks.py`, `covers.py`
-- `skald/app/` — `settings.py`, `paths.py`, `logging_setup.py`, `single_instance.py`, `updates.py`, `errors.py`
-
-Either is better than `core/`. Recommend option 1 for v1; revisit if files multiply.
-
-### B2. Rename files for naming consistency
-
-- `cli/list_cmd.py` → `cli/library.py` (or `cli/ls.py`)
-- `db/schema.py` → `db/migrations.py`
-- `integration/mpris_linux.py` → `integration/mpris.py`
-- `integration/smtc_windows.py` → `integration/smtc.py`
-- `core/playback_controller.py` → `playback/controller.py` (per B1) or `controller.py`
-
-### B3. Migrations as `.sql` files, not Python string literals
-
-A list of multi-line SQL strings in Python becomes unreadable past version ~3. SQL files are diff-friendly, syntax-highlightable, and greppable.
-
-**Refinement:** Restructure as:
-```
-src/skald/db/
-├── __init__.py
-├── connection.py
-├── migrations.py              # registry: enumerate files in migrations/ dir
-└── migrations/
-    └── 0001_initial.sql       # schema v1 here
-```
-Loader walks `migrations/`, sorts by leading number, applies any whose version > `user_version`. Compute checksum (sha256) and store in `_migrations` table per A6.
-
-### B4. `string.Template` for QSS, not `str.format`
-
-QSS uses `{` and `}` heavily for selectors (`QPushButton { color: red; }`). `str.format` requires escaping every literal brace as `{{ }}` — fragile. `string.Template` uses `$name` / `${name}` and doesn't collide with QSS.
-
-**Refinement:** Rename `themes/dark.qss.tmpl` → `themes/dark.qss.template`. Loader:
-```python
-from string import Template
-qss = Template(qss_path.read_text()).substitute(accent="#C45A3A", bg="#1a1a1a", ...)
-```
-
-### B5. Generate test fixtures, don't commit binaries
-
-Committing audio binaries adds git bloat without LFS and creates a provenance question (the LibriVox snippet has an attribution requirement).
-
-**Refinement:** In `tests/conftest.py`:
-```python
-@pytest.fixture(scope="session")
-def short_mp3(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    out = tmp_path_factory.mktemp("audio") / "short.mp3"
-    subprocess.run(
-        ["ffmpeg", "-f", "lavfi", "-i", "sine=frequency=440:duration=5",
-         "-ar", "44100", "-b:a", "128k", str(out)],
-        check=True, capture_output=True,
-    )
-    return out
-```
-Similar fixtures for `short_m4b` (with one programmatic `chpl` chapter) and `folder_book` (three numbered MP3s). `ffmpeg` is a transitive of libmpv on both OSes, so it's always available.
-
-### B6. `metadata_overrides` table — keep separate
-
-The pattern-recognition reviewer suggested merging into `books`; the data-integrity reviewer pushes back that separate-table makes "reset to embedded metadata" a clean `DELETE FROM metadata_overrides WHERE book_id=?` — a useful primitive.
-
-**Decision:** Keep `metadata_overrides` separate (data-integrity reviewer's argument wins). Read sites always use `COALESCE(o.title, b.title)` etc. — codify this in a single `library_repository.get_book(book_id)` function so no caller forgets the COALESCE.
-
-### B7. SQLite connection per thread via `threading.local`
-
-The plan doesn't specify connection lifetime. SQLite + threading is a known footgun (`check_same_thread=True` is the default, and connections aren't thread-safe).
-
-**Refinement:** `db/connection.py`:
-```python
-_local = threading.local()
-
-def get_connection() -> sqlite3.Connection:
-    conn = getattr(_local, "conn", None)
-    if conn is None:
-        conn = sqlite3.connect(db_path)
-        # Apply WAL pragmas...
-        _local.conn = conn
-    return conn
-```
-Background scanner thread (per D1 below) gets its own connection; main thread gets its own. No sharing.
-
-### B8. `import-linter` config to enforce package boundaries
-
-The original plan describes a dependency direction (`gui` may import `core`, but not vice versa) but no enforcement. The user is a non-programmer — boundaries that aren't machine-enforced will drift.
-
-**Refinement:** Add `import-linter` to dev deps. Config in `pyproject.toml`:
-```toml
-[tool.importlinter]
-root_packages = ["skald"]
-
-[[tool.importlinter.contracts]]
-name = "GUI does not leak into CLI / TUI / core"
-type = "forbidden"
-source_modules = ["skald.cli", "skald.tui", "skald.library", "skald.playback"]
-forbidden_modules = ["skald.gui", "PySide6.QtWidgets", "PySide6.QtGui"]
-
-[[tool.importlinter.contracts]]
-name = "Integration is OS-isolated at import time"
-type = "forbidden"
-source_modules = ["skald.integration.mpris"]
-forbidden_modules = ["winrt"]
-```
-Add `lint-imports` to the pre-commit hook and CI.
-
-### B9. Defer OS-specific imports
-
-Per the performance reviewer: `import winrt.*` and `import dbus_fast` at module top-level slow startup. Move into the platform-gated adapter constructor:
-```python
-def init_media_keys(controller: PlaybackController) -> MediaKeyAdapter:
-    if sys.platform == "linux":
-        from skald.integration.mpris import MprisAdapter  # local import
-        return MprisAdapter(controller)
-    elif sys.platform == "win32":
-        from skald.integration.smtc import SmtcAdapter
-        return SmtcAdapter(controller)
-    else:
-        return NullAdapter()
-```
-
-### B10. `PlaybackController` Protocol — refactor to transport-agnostic
-
-The original Protocol mixes Qt `Signal` semantics into a contract that also must satisfy the asyncio-based MPRIS adapter and a future synchronous CLI.
-
-**Refinement:** Define the contract using callback registration, not Qt signals:
-```python
-@dataclass(frozen=True, slots=True)
-class PlaybackState:
-    position_ms: int
-    duration_ms: int
-    title: str
-    chapter_title: str | None
-    cover_path: Path | None
-    is_playing: bool
-    speed: float
-
-@runtime_checkable
-class PlaybackController(Protocol):
-    def play(self) -> None: ...
-    def pause(self) -> None: ...
-    def next_chapter(self) -> None: ...
-    def prev_chapter(self) -> None: ...
-    def seek_relative(self, seconds: float) -> None: ...
-    def get_state(self) -> PlaybackState: ...
-    def add_listener(self, cb: Callable[[PlaybackState], None]) -> None: ...
-    def remove_listener(self, cb: Callable[[PlaybackState], None]) -> None: ...
-```
-The GUI controller wraps `add_listener` to bridge into Qt signals at the *boundary*. MPRIS / SMTC adapters use `add_listener` directly. No Qt coupling in the contract.
-
-### B11. UI state belongs in `QSettings`, not `config.toml` or SQLite
-
-Splitter sizes, last-used view mode, window geometry — these are UI-state, not user preferences and not library data.
-
-**Refinement:** Add an explicit rule to the plan: **`config.toml` = user-edited preferences, SQLite = library data, `QSettings` = transient UI state**. `QSettings` uses INI on Linux and the registry on Windows — handles it for free. Reduces config.toml clutter.
-
-### B12. Error hierarchy from day one
-
-The plan mentions `PlayerError` once without definition. Codify the hierarchy in Phase 1.
-
-**Refinement:** `src/skald/errors.py`:
-```python
-class SkaldError(Exception):
-    """Base for all app errors. Catch this to handle app problems."""
-
-class PlayerError(SkaldError):
-    """libmpv / audio engine failures."""
-
-class LibraryError(SkaldError):
-    """Library scan / metadata extraction failures."""
-
-class MigrationError(SkaldError):
-    """Schema migration failures."""
-```
-Every callsite catches `SkaldError` to handle expected failures and lets `KeyboardInterrupt` / `SystemExit` propagate.
-
-### B13. Translator install order
-
-The plan calls Qt i18n scaffolding in Phase 9, but `QTranslator` must be installed on `QApplication` *before* any widget with a translatable string is created. The plan doesn't pin this order.
-
-**Refinement:** In `gui/app.py`, the order is fixed:
-1. `QApplication(sys.argv)`
-2. Locale fix (per A1 it actually moves to `__main__.py`)
-3. `app.setStyle("Fusion")`
-4. Install `QTranslator`
-5. Load theme QSS
-6. Construct main window
-
----
-
-## Section C — Python idiom upgrades
-
-### C1. `pydantic-settings` for `config.toml`
-
-Untyped dict access for settings means every `settings["skip_forward"]` is `Any` and mypy is blind. `pydantic-settings` gives typed access, validation on load, sensible defaults, JSON-schema export for docs.
-
-**Refinement:**
-```python
-from pydantic_settings import BaseSettings, SettingsConfigDict
-
-class SkaldSettings(BaseSettings):
-    model_config = SettingsConfigDict(
-        toml_file=config_path,
-        env_prefix="SKALD_",
-        extra="ignore",
-    )
-    skip_forward_s: int = 30
-    skip_back_s: int = 10
-    sleep_timer_minutes: int = 30
-    theme: Literal["dark", "light", "auto"] = "auto"
-    check_for_updates: bool = True
-    # ... etc.
-```
-Ship `config.default.toml` as a packaged resource with commented defaults; copy on first run. (`tomli_w` strips comments — copying a static template preserves them.)
-
-### C2. `logging.config.dictConfig` for logging
-
-`basicConfig` is for scripts; manual handler wiring is verbose. `dictConfig` from a literal dict is the stdlib-blessed pattern.
-
-**Refinement:** `app/logging_setup.py`:
-```python
-def configure_logging(debug: bool = False) -> None:
-    logging.config.dictConfig({
-        "version": 1,
-        "formatters": {
-            "default": {"format": "%(asctime)s %(levelname)s [%(name)s] %(message)s"}
-        },
-        "handlers": {
-            "file": {
-                "class": "logging.handlers.RotatingFileHandler",
-                "filename": str(log_dir() / "skald.log"),
-                "maxBytes": 5 * 1024 * 1024,
-                "backupCount": 5,
-                "formatter": "default",
-                "level": "DEBUG" if debug else "INFO",
-            },
-            "stderr": {
-                "class": "logging.StreamHandler",
-                "stream": "ext://sys.stderr",
-                "formatter": "default",
-                "level": "WARNING",
-            },
-        },
-        "loggers": {
-            "skald": {"level": "DEBUG" if debug else "INFO", "handlers": ["file", "stderr"], "propagate": False},
-            "mpv": {"level": "WARNING", "handlers": ["file"], "propagate": False},
-        },
-    })
-```
-
-### C3. `pathlib.Path` everywhere; wrap `platformdirs`
-
-`platformdirs` returns `str`; treat that as a code smell. Wrap once.
-
-**Refinement:** `app/paths.py`:
-```python
-def data_dir() -> Path:
-    return Path(platformdirs.user_data_dir("skald", appauthor=False, ensure_exists=True))
-
-def config_path() -> Path:
-    return data_dir() / "config.toml"
-
-def db_path() -> Path:
-    return data_dir() / "library.db"
-
-def covers_dir() -> Path:
-    d = data_dir() / "covers"
-    d.mkdir(exist_ok=True)
-    return d
-
-def thumbnails_dir() -> Path:
-    d = data_dir() / "thumbnails"
-    d.mkdir(exist_ok=True)
-    return d
-
-def log_dir() -> Path:
-    d = Path(platformdirs.user_log_dir("skald", appauthor=False, ensure_exists=True))
-    return d
-```
-
-### C4. `PySide6-stubs` + local `mpv.pyi`
-
-mypy strict-ish requires real types.
-
-**Refinement:**
-- Add `PySide6-stubs` to dev deps (community-maintained, lags releases by weeks but mostly correct)
-- Create `src/skald/_stubs/mpv.pyi` covering the ~10 properties/methods we use (`MPV`, `play`, `pause`, `speed`, `time_pos`, `chapter`, `chapter_list`, `seek`, `terminate`, `observe_property`, `event_callback`)
-- Configure `mypy.ini` with `mypy_path = src/skald/_stubs`
-
-### C5. Explicit imports, never star
-
-`from PySide6.QtWidgets import *` breaks mypy/pyright/IDE autocomplete.
-
-**Refinement:** Always explicit:
-```python
-from PySide6.QtWidgets import QApplication, QMainWindow, QSplitter, QListView, QStackedWidget
-from PySide6.QtCore import Qt, QObject, Signal, QTimer
-```
-Or grouped alias when the import list is overwhelming:
-```python
-from PySide6 import QtWidgets as qtw, QtCore as qtc, QtGui as qtg
-```
-
-### C6. Frozen, slotted dataclasses for value objects
-
-`PlaybackState` (per B10), and any other value object emitted as a callback payload:
-```python
-@dataclass(frozen=True, slots=True)
-class PlaybackState: ...
-```
-Frozen → immutability prevents accidental mutation across threads. Slots → marginally faster attribute access + smaller memory.
-
-### C7. Click vs Typer — soft re-opener
-
-The Python reviewer prefers Click for explicitness. The brainstorm (Q10) picked Typer. Both work; this is taste. **Decision:** keep Typer per the brainstorm — but acknowledge the tradeoff: Typer's type-hint magic is occasionally fragile under mypy strict. Add `# type: ignore` sparingly if it bites.
-
----
-
-## Section D — Performance improvements
-
-### D1. Scanner runs on a `QThread` with progress signals
-
-A synchronous scan of 500 books × 3 tracks × ~30ms = 45–90s on HDD. The UI must not freeze.
-
-**Refinement:** `core/scanner.py` exposes:
-```python
-class ScannerWorker(QObject):
-    progress = Signal(int, int, str)         # (done, total, current_folder)
-    book_discovered = Signal(int)            # book_id newly inserted
-    finished = Signal(int, int)              # (added, missing)
-
-    def scan(self, folders: list[Path]) -> None: ...
-```
-Run on a `QThread`; the GUI starts it from a "Rescan" button and shows a non-modal progress bar. Books appear incrementally in the library view. The `book_discovered` signal triggers a model insert on the main thread.
-
-`QThreadPool` is *not* appropriate here — concurrent reads on a single HDD thrash the heads. One worker thread per drive at most.
-
-### D2. Pre-thumbnail covers on extraction
-
-Embedded cover JPEGs are often 600–1500px. Loading 500 of those at 180px raw on the grid burns RAM and stutters scroll.
-
-**Refinement:** During cover extraction in `core/covers.py`, write two files:
-- `<data_dir>/covers/<book_id>.jpg` — original, full resolution (user-uploaded or extracted)
-- `<data_dir>/thumbnails/<book_id>.jpg` — 360px square (2× for HiDPI), JPEG quality 85
-
-The library view reads from `thumbnails/`; the book detail view reads from `covers/`.
-
-### D3. `QPixmapCache` LRU 64 MB
-
-```python
-from PySide6.QtGui import QPixmapCache
-QPixmapCache.setCacheLimit(64 * 1024)  # KiB
-```
-Set once in `gui/app.py`. Custom delegate uses `QPixmapCache.find(key)` before loading from disk. Decoding never happens on paint().
-
-### D4. Position-write timer pauses when paused
-
-`positions.write()` every 5s while paused costs disk wakeups (and on a laptop, ~0.5–2W of battery for the HDD spin).
-
-**Refinement:** The 5s timer in `core/positions.py` (or wherever it lives — likely `playback/controller.py`) starts on `play()` and stops on `pause()`. On-event writes (pause, seek, chapter, exit, focus loss) still happen — those are needed regardless.
-
-### D5. MPRIS/SMTC position updates throttled
-
-The MPRIS spec says emit `PropertiesChanged` on actual change, not on poll. Clients query position when needed.
-
-**Refinement:** In `integration/mpris.py` and `integration/smtc.py`:
-- Emit metadata-changed only on track / chapter / title / cover change
-- Position is queried via the spec, not pushed — return current `time_pos` on demand
-- SMTC `display_updater.update()` only on track/chapter change
-- SMTC `SetTimelineProperties()` at most every 5s
-
-### D6. Avoid theme-switch thrash
-
-`app.setStyleSheet()` triggers a global recomputation — 50–200ms hitch on a 200-widget window. Walking widgets for `unpolish`/`polish` adds 20–50ms.
-
-**Refinement:**
-- For user clicks: just apply, accept the hitch
-- For follow-system: debounce 200ms in case the OS theme transition fires twice during animation
-- Defer the apply until `QListView` finishes scrolling: `QTimer.singleShot(0, apply_theme)` so the next event loop iteration handles paint
-
-### D7. Defer heavy imports for startup time
-
-Target: <2s startup on a 100-book library, SSD. Dominators are PySide6 import (~400–800ms) + Qt platform plugin init (~200–400ms).
-
-**Refinement:**
-- Don't `import winrt` / `dbus_fast` at module level — defer to inside `init_media_keys()` (per B9)
-- Don't load all covers on startup — lazy-load via the model's `data()` method as the view scrolls
-- DB read on startup is one `SELECT * FROM books` (~5ms for 100 rows) — fine
-
----
-
-## Section E — Updated risk table additions
-
-Add these rows to the original "Risk Analysis & Mitigation" table:
-
-| Risk | Likelihood | Impact | Mitigation |
-|---|---|---|---|
-| **Folder rename orphans user's position/bookmarks** | High | High | A2: stable `book_uuid` via sidecar or fingerprint |
-| **Power loss mid-migration corrupts DB** | Low | High | A3: explicit `BEGIN`/`COMMIT` around each migration; A5: online backup before |
-| **User downgrades skald binary, opens newer-schema DB, code-path silently corrupts data** | Medium | High | A4: refuse to open DB with `user_version > EXPECTED_VERSION` |
-| **`QLocalServer` socket spoofed by another local user on shared Linux** | Low | Medium | A11: `UserAccessOption` + `user_runtime_dir` with 0700 |
-| **Scanner hangs on symlink loop in watched folder** | Medium | Medium | A8: `followlinks=False` + inode-dedup + depth cap |
-| **Malicious image triggers Qt CVE via cover upload** | Low | Medium | A10: re-encode through `QImageReader` with allocation limit |
-| **User runs `pip install skald` and gets unrelated PyPI package** | Medium | High | A17: README never instructs pip install |
-| **Bundled `mpv-2.dll` carries stale ffmpeg CVEs into v0.N** | Medium | Medium | A19: fetch DLL at CI build time, record SHA256 |
-| **External re-tag (mp3tag) not detected on next scan** | High | Low | A15: store `tracks.file_mtime`, re-extract on change |
-| **Synchronous scan freezes UI on a 500-book library** | High | Medium | D1: `QThread`-based scanner with progress |
-
----
-
-## Section F — Optional scope rollbacks (user decision)
-
-The code-simplicity reviewer made a different argument: ship a v1 that is actually shippable in 10 days by dropping scope the user already chose. These contradict explicit brainstorm decisions; **none are auto-applied**. Listing them so the option is visible if `v1` slips:
+These are **not applied**. They contradict explicit brainstorm decisions. Listed so the option is visible if v1 schedule slips and you want to ship a leaner first release. Each can be re-added in v0.2.0 once v0.1.0 is shipping daily-driver use.
 
 | Rollback | Saves | Contradicts brainstorm | When to consider |
 |---|---|---|---|
-| Drop MPRIS + SMTC (no media keys in v1) | ~2.5 days | Q6 (explicit) | If Phase 8 looks like it'll consume more than 4 days |
-| Drop i18n scaffolding (no `tr()` wrappers) | ~0.5 day | Q22 (explicit) | If `lupdate` / `lrelease` tooling fights you for half a day |
-| Drop update-check banner | ~0.5 day | Q18 (explicit) | If GH API rate-limit or proxy environments turn into bug reports |
-| Single dialog file `gui/dialogs.py` instead of three | ~minor | Style only | Anytime — pure taste |
-| Single `db.py` instead of `db/{schema,connection}.py` | ~minor | Style only | Anytime — pure taste |
+| Drop MPRIS + SMTC (no media keys in v1) | ~2.5 days | Q6 (explicit) | If Phase 8 consumes more than 4 days |
+| Drop i18n scaffolding (no `tr()` wrappers) | ~0.5 day | Q22 (explicit) | If `lupdate` / `lrelease` tooling fights you |
+| Drop update-check banner | ~0.5 day | Q18 (explicit) | If GH API rate-limit / proxy environments cause bug reports |
+| Single `db.py` instead of `db/{connection,migrations}.py` | ~minor | Style only | Anytime |
 | Drop grid OR list view (pick list) | ~0.5 day | Q12 (explicit) | If grid view perf becomes a multi-day rabbit hole |
-| Drop manual cover-art upload | ~0.5 day | Q8 (explicit) | If image re-encoding (A10) turns into half a day of fighting Qt |
-| Drop multi-watched-folder support (single `~/Audiobooks`) | ~minor | Q7 | Anytime — most users have one folder |
+| Drop manual cover-art upload | ~0.5 day | Q8 (explicit) | If image re-encoding fights Qt for half a day |
+| Drop multi-watched-folder support (single `~/Audiobooks`) | ~minor | Q7 | Anytime; most users have one folder |
 
-The user explicitly answered each of these in the brainstorm. The simplicity reviewer's argument is that personal-project velocity matters more than scope fidelity. Both arguments are valid — the user decides at implementation time when they hit a wall, not pre-emptively.
-
----
-
-## Section G — Updated acceptance criteria (additions)
-
-Add to the Functional Requirements checklist:
-
-- [ ] Folder rename does not orphan position/bookmarks/metadata (book identified by `book_uuid`, not `path`)
-- [ ] Re-tagging an audio file in an external editor (mp3tag) triggers metadata re-extraction on next scan
-- [ ] Scanner does not hang on symlink loops or recurse beyond depth 8
-- [ ] CLI rejects audio paths outside the allowed extension set
-- [ ] Cover upload re-encodes through `QImageReader` and never stores raw user bytes
-- [ ] DB written by a newer skald is rejected with a clear error message
-
-Add to the Non-functional Requirements checklist:
-
-- [ ] Scanner runs on a background thread; UI stays responsive during a 500-book scan
-- [ ] Grid view scrolls smoothly at 500 books on a 1080p display (no per-frame JPEG decode)
-- [ ] Position-write timer is inactive while playback is paused
-- [ ] MPRIS/SMTC position updates emitted no more than once per 5 seconds
-- [ ] `import-linter` boundary contracts pass in CI
-- [ ] All SQL uses `?` parameter binding; `ruff S608` passes
-- [ ] No `pip install skald` instructions in any documentation
-- [ ] Release artifacts have `SHA256SUMS.txt` attached to the GitHub Release
-
-Add to the Quality Gates:
-
-- [ ] `pre-commit` includes `lint-imports` (import-linter)
-- [ ] `tests/conftest.py` generates audio fixtures via `ffmpeg`; no committed binaries
-- [ ] Migration test covers: fresh-install, v1→vN with seeded data, simulated mid-migration crash, future-DB refusal, checksum mismatch detection
+The user explicitly answered each of these in the brainstorm. The simplicity reviewer's argument was that personal-project velocity matters more than scope fidelity. Both arguments are valid — decide at implementation time when you hit a wall, not pre-emptively.
