@@ -1,8 +1,6 @@
-# skald
+# skald — named for the Old Norse poet-storytellers who recited sagas aloud
 
 Cross-platform audiobook player for Linux and Windows. GUI + CLI.
-
-Named for the Old Norse poet-storytellers who recited sagas aloud.
 
 ## Status
 
