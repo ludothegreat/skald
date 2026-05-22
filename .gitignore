@@ -18,6 +18,9 @@ venv/
 env/
 ENV/
 
+# Phase 0 spike venv (kept in tree for now as a recyclable reference)
+spike/.venv/
+
 # Testing / coverage
 .pytest_cache/
 .coverage
